@@ -1,0 +1,32 @@
+{
+  "name": "nexir-language",
+  "displayName": "Nexir Language Support",
+  "description": "Syntax highlighting and one-click run support for Nexir .nx programs.",
+  "version": "0.1.0",
+  "publisher": "quoctuan21112009",
+  "engines": { "vscode": "^1.80.0" },
+  "categories": ["Programming Languages", "Other"],
+  "main": "./extension.js",
+  "activationEvents": ["onLanguage:nexir", "workspaceContains:*.nx"],
+  "contributes": {
+    "languages": [{
+      "id": "nexir",
+      "aliases": ["Nexir", "nx"],
+      "extensions": [".nx"],
+      "configuration": "./language-configuration.json"
+    }],
+    "grammars": [{ "language": "nexir", "scopeName": "source.nexir", "path": "./syntaxes/nexir.tmLanguage.json" }],
+    "commands": [{ "command": "nexir.runFile", "title": "Run Nexir File", "category": "Nexir", "icon": "$(play)" }],
+    "menus": {
+      "editor/title": [{ "command": "nexir.runFile", "when": "editorLangId == nexir", "group": "navigation@1" }],
+      "commandPalette": [{ "command": "nexir.runFile", "when": "editorLangId == nexir" }]
+    },
+    "iconThemes": [{ "id": "nexir-file-icons", "label": "Nexir File Icons", "path": "./icons/nexir-icon-theme.json" }],
+    "configuration": {
+      "title": "Nexir",
+      "properties": {
+        "nexir.runCommand": { "type": "string", "default": "nx", "description": "Nexir CLI executable used by the Run button (for example nx or py -3 -m nexir)." }
+      }
+    }
+  }
+}

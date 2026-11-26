@@ -1,0 +1,7 @@
+{
+  "iconDefinitions": {
+    "_nexir": { "iconPath": "./nexir.svg" }
+  },
+  "fileExtensions": { "nx": "_nexir" },
+  "fileNames": { "main.nx": "_nexir" }
+}
