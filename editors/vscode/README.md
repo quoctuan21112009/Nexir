@@ -3,6 +3,9 @@
 This extension adds `.nx` syntax coloring, a Nexir file icon theme, a Run button in
 the editor title bar, and a `Run Nexir` CodeLens above the source. It uses VS
 Code's task API and passes the active file as a separate process argument.
+Version 0.2 highlights NX 1.1 declarations (`fn`, `struct`, `trait`), ownership,
+SIMD, parallel loops and Result error syntax.
+Version 0.3 also highlights `Buffer[T]` and supports running files with `@py_call`.
 
 ## Run from the extension source
 
@@ -16,7 +19,7 @@ Code's task API and passes the active file as a separate process argument.
    executable, not shell text.
 
 To package it, run `npx @vscode/vsce package` in this directory and install the
-resulting VSIX. The icon theme is named **Nexir File Icons**; select it in
+resulting VSIX. Run **Nexir: Enable Nexir File Icons** from the Command Palette to show `.nx` icons in Explorer. The icon theme is named **Nexir File Icons**; select it in
 Preferences → File Icon Theme.
 
 Antigravity support depends on its version supporting VS Code extensions and

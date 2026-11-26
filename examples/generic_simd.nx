@@ -1,0 +1,10 @@
+fn add_lanes[T: Number, size: Int](a: SIMD[T, size], b: SIMD[T, size]) -> SIMD[T, size]:
+    return a + b
+
+
+fn main() -> i32:
+    left = SIMD[f64, 4](1.0, 2.0, 3.0, 4.0)
+    right = SIMD[f64, 4](2.0, 2.0, 2.0, 2.0)
+    result = add_lanes(left, right)
+    print(result[2], len(result))
+    return 0

@@ -2,7 +2,7 @@
   "name": "nexir-language",
   "displayName": "Nexir Language Support",
   "description": "Syntax highlighting and one-click run support for Nexir .nx programs.",
-  "version": "0.1.0",
+  "version": "0.3.0",
   "publisher": "quoctuan21112009",
   "engines": { "vscode": "^1.80.0" },
   "categories": ["Programming Languages", "Other"],
@@ -16,10 +16,16 @@
       "configuration": "./language-configuration.json"
     }],
     "grammars": [{ "language": "nexir", "scopeName": "source.nexir", "path": "./syntaxes/nexir.tmLanguage.json" }],
-    "commands": [{ "command": "nexir.runFile", "title": "Run Nexir File", "category": "Nexir", "icon": "$(play)" }],
+    "commands": [
+      { "command": "nexir.runFile", "title": "Run Nexir File", "category": "Nexir", "icon": "$(play)" },
+      { "command": "nexir.enableFileIcons", "title": "Enable Nexir File Icons", "category": "Nexir" }
+    ],
     "menus": {
       "editor/title": [{ "command": "nexir.runFile", "when": "editorLangId == nexir", "group": "navigation@1" }],
-      "commandPalette": [{ "command": "nexir.runFile", "when": "editorLangId == nexir" }]
+      "commandPalette": [
+        { "command": "nexir.runFile", "when": "editorLangId == nexir" },
+        { "command": "nexir.enableFileIcons" }
+      ]
     },
     "iconThemes": [{ "id": "nexir-file-icons", "label": "Nexir File Icons", "path": "./icons/nexir-icon-theme.json" }],
     "configuration": {

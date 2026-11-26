@@ -1,0 +1,19 @@
+trait AddFive:
+    fn combine(self, other: i32) -> i32:
+        pass
+
+
+struct Box:
+    value: i32
+
+    fn combine(self, other: i32) -> i32:
+        return self.value + other
+
+
+fn apply[T: AddFive](item: T) -> i32:
+    return item.combine(5)
+
+
+fn main() -> i32:
+    print(apply(Box(7)))
+    return 0

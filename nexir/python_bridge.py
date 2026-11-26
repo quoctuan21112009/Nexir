@@ -8,8 +8,12 @@ synchronous call and must not concurrently mutate it.
 
 PYTHON_BRIDGE_CPP = r'''#include <Python.h>
 #include <cmath>
+#include <cstddef>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
+#include <cstring>
+#include <limits>
 #include <mutex>
 #include <string>
 #include <unordered_map>
@@ -121,6 +125,66 @@ double call_f64(const char* module_name, const char* function_name,
     PyGILState_Release(gil);
     return value;
 }
+
+char* call_str(const char* module_name, const char* function_name,
+               const double* data, std::size_t length) {
+    if (!ensure_python()) return nullptr;
+    const PyGILState_STATE gil = PyGILState_Ensure();
+    PyObject* callable = load_function(module_name, function_name);
+    PyObject* view = callable ? ctypes_view(data, length) : nullptr;
+    PyObject* result = (callable && view) ? PyObject_CallFunctionObjArgs(callable, view, nullptr) : nullptr;
+    Py_XDECREF(view);
+    char* output = nullptr;
+    if (result && PyUnicode_Check(result)) {
+        Py_ssize_t size = 0;
+        const char* utf8 = PyUnicode_AsUTF8AndSize(result, &size);
+        if (utf8 && size >= 0 && static_cast<std::size_t>(size) < std::numeric_limits<std::size_t>::max()) {
+            output = static_cast<char*>(std::malloc(static_cast<std::size_t>(size) + 1));
+            if (output) {
+                std::memcpy(output, utf8, static_cast<std::size_t>(size));
+                output[size] = '\0';
+            } else PyErr_NoMemory();
+        }
+    } else if (result) {
+        PyErr_SetString(PyExc_TypeError, "@py_call function must return str");
+    }
+    if (!output) report_python_error("string call failed");
+    Py_XDECREF(result);
+    PyGILState_Release(gil);
+    return output;
+}
+
+nx_mutspan_f64 call_buffer(const char* module_name, const char* function_name,
+                           const double* data, std::size_t length) {
+    nx_mutspan_f64 output{nullptr, std::numeric_limits<std::size_t>::max()};
+    if (!ensure_python()) return output;
+    const PyGILState_STATE gil = PyGILState_Ensure();
+    PyObject* callable = load_function(module_name, function_name);
+    PyObject* view = callable ? ctypes_view(data, length) : nullptr;
+    PyObject* result = (callable && view) ? PyObject_CallFunctionObjArgs(callable, view, nullptr) : nullptr;
+    Py_XDECREF(view);
+    PyObject* sequence = result ? PySequence_Fast(result, "@py_call buffer result must be a numeric sequence") : nullptr;
+    if (sequence) {
+        const Py_ssize_t count = PySequence_Fast_GET_SIZE(sequence);
+        if (count >= 0 && static_cast<std::size_t>(count) <= std::numeric_limits<std::size_t>::max() / sizeof(double)) {
+            double* values = count ? static_cast<double*>(std::malloc(static_cast<std::size_t>(count) * sizeof(double))) : nullptr;
+            if (count == 0 || values) {
+                bool valid = true;
+                for (Py_ssize_t i = 0; i < count; ++i) {
+                    values[i] = PyFloat_AsDouble(PySequence_Fast_GET_ITEM(sequence, i));
+                    if (PyErr_Occurred()) { valid = false; break; }
+                }
+                if (valid) output = {values, static_cast<std::size_t>(count)};
+                else std::free(values);
+            } else PyErr_NoMemory();
+        } else PyErr_SetString(PyExc_OverflowError, "Python buffer result is too large");
+    }
+    if (output.len == std::numeric_limits<std::size_t>::max()) report_python_error("buffer call failed");
+    Py_XDECREF(sequence);
+    Py_XDECREF(result);
+    PyGILState_Release(gil);
+    return output;
+}
 } // namespace
 
 extern "C" void nx_py_initialize(void) {
@@ -149,5 +213,17 @@ extern "C" double nx_py_call_f64_mutspan(const char* module_name,
                                           const char* function_name,
                                           nx_mutspan_f64 data) {
     return call_f64(module_name, function_name, data.ptr, data.len);
+}
+extern "C" char* nx_py_call_str_span(const char* module, const char* function, nx_span_f64 data) {
+    return call_str(module, function, data.ptr, data.len);
+}
+extern "C" char* nx_py_call_str_mutspan(const char* module, const char* function, nx_mutspan_f64 data) {
+    return call_str(module, function, data.ptr, data.len);
+}
+extern "C" nx_mutspan_f64 nx_py_call_buffer_span(const char* module, const char* function, nx_span_f64 data) {
+    return call_buffer(module, function, data.ptr, data.len);
+}
+extern "C" nx_mutspan_f64 nx_py_call_buffer_mutspan(const char* module, const char* function, nx_mutspan_f64 data) {
+    return call_buffer(module, function, data.ptr, data.len);
 }
 '''

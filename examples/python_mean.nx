@@ -1,0 +1,8 @@
+@extern("nx_py_call_f64_span")
+def mean(module: str, function: str, values: Span[f64]) -> f64:
+    pass
+
+
+def main():
+    values = [1.0, 2.0, 3.0]
+    print(mean("nx_worker", "calculate", values))

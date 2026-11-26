@@ -1,0 +1,19 @@
+trait Combine:
+    fn combine(self, other: Self) -> i32:
+        pass
+
+
+struct Box:
+    value: i32
+
+    fn combine(self, other: Box) -> i32:
+        return self.value + other.value
+
+
+fn sum_two[T: Combine](first: T, second: T) -> i32:
+    return first.combine(second)
+
+
+fn main() -> i32:
+    print(sum_two(Box(2), Box(3)))
+    return 0

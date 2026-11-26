@@ -1,0 +1,25 @@
+@py_call("nx_py_worker", "mean")
+def python_mean(values: Span[f64]) -> f64:
+    pass
+
+
+@py_call("nx_py_worker", "label")
+def python_label(values: Span[f64]) -> str:
+    pass
+
+
+@py_call("nx_py_worker", "doubles")
+def python_doubles(values: Span[f64]) -> owned[Buffer[f64]]:
+    pass
+
+
+@cap("memory.alloc")
+fn main() -> i32:
+    values = Buffer[f64](4)
+    for i in range(4):
+        values[i] = f64(i + 1)
+    print(python_mean(buffer_span(values)))
+    print(python_label(buffer_span(values)))
+    doubled = python_doubles(buffer_span(values))
+    print(doubled[2])
+    return 0

@@ -6,7 +6,10 @@ Spans keep a two-field C ABI for native interoperability. Dynamic values use a
 
 PRELUDE = r'''
 #define _POSIX_C_SOURCE 200112L
+#include <algorithm>
+#include <cctype>
 #include <atomic>
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
@@ -15,11 +18,33 @@ PRELUDE = r'''
 #include <initializer_list>
 #include <limits>
 #include <memory>
+#include <sstream>
 #include <mutex>
+#include <optional>
 #include <string>
+#include <string_view>
+#include <thread>
+#include <tuple>
+#include <unordered_map>
+#include <unordered_set>
 #include <type_traits>
 #include <utility>
+#include <variant>
 #include <vector>
+template <typename T> struct nx_hash : std::hash<T> {};
+template <typename T> struct nx_equal : std::equal_to<T> {};
+template <> struct nx_hash<const char *> {
+    std::size_t operator()(const char *value) const { return std::hash<std::string_view>{}(value); }
+};
+template <> struct nx_equal<const char *> {
+    bool operator()(const char *a, const char *b) const { return std::strcmp(a, b) == 0; }
+};
+#if (defined(__x86_64__) || defined(__i386__)) && (defined(__GNUC__) || defined(__clang__))
+#include <immintrin.h>
+#define NX_X86_SIMD 1
+#define NX_TARGET_AVX2 __attribute__((target("avx2")))
+#define NX_TARGET_SSE2 __attribute__((target("sse2")))
+#endif
 #ifdef _WIN32
 #include <winsock2.h>
 #include <ws2tcpip.h>
@@ -37,6 +62,17 @@ PRELUDE = r'''
     std::exit(1);
 }
 
+template <typename T> struct nx_result {
+    std::variant<T, std::string> state;
+    explicit nx_result(T value) : state(std::in_place_index<0>, std::move(value)) {}
+    explicit nx_result(std::string error) : state(std::in_place_index<1>, std::move(error)) {}
+    bool ok() const { return state.index() == 0; }
+    T value() const { if (!ok()) nx_fail("unwrap of error Result"); return std::get<0>(state); }
+    const char *error() const { if (ok()) nx_fail("error of successful Result"); return std::get<1>(state).c_str(); }
+};
+template <typename T> static nx_result<T> nx_ok(T value) { return nx_result<T>(std::move(value)); }
+template <typename T> static nx_result<T> nx_err(const char *message) { return nx_result<T>(std::string(message)); }
+
 struct nx_span_i32 { const std::int32_t *ptr; std::size_t len; };
 struct nx_mutspan_i32 { std::int32_t *ptr; std::size_t len; };
 struct nx_span_i64 { const std::int64_t *ptr; std::size_t len; };
@@ -46,6 +82,116 @@ struct nx_mutspan_f32 { float *ptr; std::size_t len; };
 struct nx_span_f64 { const double *ptr; std::size_t len; };
 struct nx_mutspan_f64 { double *ptr; std::size_t len; };
 
+static std::size_t nx_bounds(std::int64_t index, std::size_t len);
+
+template <typename T, std::size_t N> struct nx_simd {
+    alignas(32) std::array<T, N> lane{};
+    T &at(std::int64_t i) { return lane[nx_bounds(i, N)]; }
+    const T &at(std::int64_t i) const { return lane[nx_bounds(i, N)]; }
+};
+
+template <typename T, std::size_t N> static nx_simd<T, N> nx_simd_scalar(const nx_simd<T, N> &a, const nx_simd<T, N> &b, char op) {
+    nx_simd<T, N> out;
+#pragma omp simd
+    for (std::size_t i = 0; i < N; ++i)
+        out.lane[i] = op == '+' ? a.lane[i] + b.lane[i] : op == '-' ? a.lane[i] - b.lane[i] : a.lane[i] * b.lane[i];
+    return out;
+}
+
+#ifdef NX_X86_SIMD
+template <typename T, std::size_t N> NX_TARGET_AVX2 static nx_simd<T, N> nx_simd_avx2(const nx_simd<T, N> &a, const nx_simd<T, N> &b, char op) {
+    nx_simd<T, N> out;
+    std::size_t i = 0;
+    if constexpr (std::is_same_v<T, float>) {
+        for (; i + 8 <= N; i += 8) {
+            auto x = _mm256_loadu_ps(a.lane.data() + i), y = _mm256_loadu_ps(b.lane.data() + i);
+            auto z = op == '+' ? _mm256_add_ps(x, y) : op == '-' ? _mm256_sub_ps(x, y) : _mm256_mul_ps(x, y);
+            _mm256_storeu_ps(out.lane.data() + i, z);
+        }
+    } else if constexpr (std::is_same_v<T, double>) {
+        for (; i + 4 <= N; i += 4) {
+            auto x = _mm256_loadu_pd(a.lane.data() + i), y = _mm256_loadu_pd(b.lane.data() + i);
+            auto z = op == '+' ? _mm256_add_pd(x, y) : op == '-' ? _mm256_sub_pd(x, y) : _mm256_mul_pd(x, y);
+            _mm256_storeu_pd(out.lane.data() + i, z);
+        }
+    } else if constexpr (std::is_same_v<T, std::int32_t>) {
+        for (; i + 8 <= N; i += 8) {
+            auto x = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(a.lane.data() + i));
+            auto y = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(b.lane.data() + i));
+            auto z = op == '+' ? _mm256_add_epi32(x, y) : op == '-' ? _mm256_sub_epi32(x, y) : _mm256_mullo_epi32(x, y);
+            _mm256_storeu_si256(reinterpret_cast<__m256i*>(out.lane.data() + i), z);
+        }
+    } else if constexpr (std::is_same_v<T, std::int64_t>) {
+        if (op != '*') for (; i + 4 <= N; i += 4) {
+            auto x = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(a.lane.data() + i));
+            auto y = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(b.lane.data() + i));
+            auto z = op == '+' ? _mm256_add_epi64(x, y) : _mm256_sub_epi64(x, y);
+            _mm256_storeu_si256(reinterpret_cast<__m256i*>(out.lane.data() + i), z);
+        }
+    }
+    for (; i < N; ++i)
+        out.lane[i] = op == '+' ? a.lane[i] + b.lane[i] : op == '-' ? a.lane[i] - b.lane[i] : a.lane[i] * b.lane[i];
+    return out;
+}
+
+template <typename T, std::size_t N> NX_TARGET_SSE2 static nx_simd<T, N> nx_simd_sse2(const nx_simd<T, N> &a, const nx_simd<T, N> &b, char op) {
+    nx_simd<T, N> out;
+    std::size_t i = 0;
+    if constexpr (std::is_same_v<T, float>) {
+        for (; i + 4 <= N; i += 4) {
+            auto x = _mm_loadu_ps(a.lane.data() + i), y = _mm_loadu_ps(b.lane.data() + i);
+            auto z = op == '+' ? _mm_add_ps(x, y) : op == '-' ? _mm_sub_ps(x, y) : _mm_mul_ps(x, y);
+            _mm_storeu_ps(out.lane.data() + i, z);
+        }
+    } else if constexpr (std::is_same_v<T, double>) {
+        for (; i + 2 <= N; i += 2) {
+            auto x = _mm_loadu_pd(a.lane.data() + i), y = _mm_loadu_pd(b.lane.data() + i);
+            auto z = op == '+' ? _mm_add_pd(x, y) : op == '-' ? _mm_sub_pd(x, y) : _mm_mul_pd(x, y);
+            _mm_storeu_pd(out.lane.data() + i, z);
+        }
+    }
+    for (; i < N; ++i)
+        out.lane[i] = op == '+' ? a.lane[i] + b.lane[i] : op == '-' ? a.lane[i] - b.lane[i] : a.lane[i] * b.lane[i];
+    return out;
+}
+#endif
+
+template <typename T, std::size_t N> static nx_simd<T, N> nx_simd_binary(const nx_simd<T, N> &a, const nx_simd<T, N> &b, char op) {
+#ifdef NX_X86_SIMD
+    if constexpr ((std::is_same_v<T, float> && N >= 8) || (std::is_same_v<T, double> && N >= 4) ||
+                  (std::is_same_v<T, std::int32_t> && N >= 8) || (std::is_same_v<T, std::int64_t> && N >= 4)) {
+        if ((op != '*' || !std::is_same_v<T, std::int64_t>) && __builtin_cpu_supports("avx2"))
+            return nx_simd_avx2(a, b, op);
+    }
+    if constexpr ((std::is_same_v<T, float> && N >= 4) || (std::is_same_v<T, double> && N >= 2)) {
+        if (__builtin_cpu_supports("sse2")) return nx_simd_sse2(a, b, op);
+    }
+#endif
+    return nx_simd_scalar(a, b, op);
+}
+template <typename T, std::size_t N> static nx_simd<T, N> operator+(const nx_simd<T, N> &a, const nx_simd<T, N> &b) { return nx_simd_binary(a, b, '+'); }
+template <typename T, std::size_t N> static nx_simd<T, N> operator-(const nx_simd<T, N> &a, const nx_simd<T, N> &b) { return nx_simd_binary(a, b, '-'); }
+template <typename T, std::size_t N> static nx_simd<T, N> operator*(const nx_simd<T, N> &a, const nx_simd<T, N> &b) { return nx_simd_binary(a, b, '*'); }
+template <typename F> static void nx_parallel_for(std::int64_t start, std::int64_t stop, F body) {
+    if (stop <= start) return;
+    if (start < 0 && stop > std::numeric_limits<std::int64_t>::max() + start)
+        nx_fail("parallel_range is too large");
+    const std::int64_t count = stop - start;
+    const auto hardware = std::thread::hardware_concurrency();
+    const std::int64_t workers = std::min<std::int64_t>(count, hardware ? hardware : 1);
+    if (workers == 1) { for (std::int64_t i = start; i < stop; ++i) body(i); return; }
+    std::vector<std::thread> threads;
+    threads.reserve(static_cast<std::size_t>(workers));
+    const auto base = count / workers;
+    const auto remainder = count % workers;
+    for (std::int64_t worker = 0; worker < workers; ++worker) {
+        const auto first = start + base * worker + std::min(worker, remainder);
+        const auto last = start + base * (worker + 1) + std::min(worker + 1, remainder);
+        threads.emplace_back([=, &body] { for (auto i = first; i < last; ++i) body(i); });
+    }
+    for (auto &thread : threads) thread.join();
+}
+
 static std::size_t nx_bounds(std::int64_t index, std::size_t len) {
     if (index < 0 || static_cast<std::uint64_t>(index) >= len) {
         std::fprintf(stderr, "NEXIR index out of bounds: %lld (length %zu)\n",
@@ -53,6 +199,80 @@ static std::size_t nx_bounds(std::int64_t index, std::size_t len) {
         std::exit(1);
     }
     return static_cast<std::size_t>(index);
+}
+
+template <typename T> class nx_buffer {
+    std::vector<T> storage_;
+public:
+    explicit nx_buffer(std::int64_t count) {
+        if (count < 0) nx_fail("negative Buffer length");
+        storage_.resize(static_cast<std::size_t>(count));
+    }
+    std::size_t size() const { return storage_.size(); }
+    T &at(std::int64_t index) { return storage_[nx_bounds(index, storage_.size())]; }
+    const T &at(std::int64_t index) const { return storage_[nx_bounds(index, storage_.size())]; }
+    T *data() { return storage_.data(); }
+    const T *data() const { return storage_.data(); }
+};
+
+template <typename T> static T &nx_list_at(std::vector<T> &values, std::int64_t index) {
+    return values[nx_bounds(index, values.size())];
+}
+template <typename T> static T nx_list_pop(std::vector<T> &values) {
+    if (values.empty()) nx_fail("pop from empty List");
+    T result = std::move(values.back());
+    values.pop_back();
+    return result;
+}
+template <typename T> static void nx_list_sort(std::vector<T> &values) { std::sort(values.begin(), values.end()); }
+static void nx_list_sort(std::vector<const char *> &values) {
+    std::sort(values.begin(), values.end(), [](const char *a, const char *b) { return std::strcmp(a, b) < 0; });
+}
+template <typename T> static bool nx_list_contains(const std::vector<T> &values, const T &value) {
+    return std::find(values.begin(), values.end(), value) != values.end();
+}
+static bool nx_list_contains(const std::vector<const char *> &values, const char *value) {
+    return std::any_of(values.begin(), values.end(), [=](const char *item) { return std::strcmp(item, value) == 0; });
+}
+template <typename T> static bool nx_span_contains(const T *values, std::size_t count, T value) {
+    if (count == 0) return false;
+    return std::find(values, values + count, value) != values + count;
+}
+template <typename T> static std::vector<T> nx_slice(const T *values, std::size_t count,
+        std::int64_t start, std::int64_t stop, std::int64_t step, bool has_start, bool has_stop) {
+    if (step == 0) nx_fail("slice step cannot be zero");
+    if (count > static_cast<std::size_t>(std::numeric_limits<std::int64_t>::max())) nx_fail("slice is too large");
+    const std::int64_t n = static_cast<std::int64_t>(count);
+    const bool forward = step > 0;
+    if (!has_start) start = forward ? 0 : n - 1;
+    else if (start < 0) start += n;
+    if (!has_stop) stop = forward ? n : -1;
+    else if (stop < 0) stop += n;
+    if (forward) {
+        start = std::max<std::int64_t>(0, std::min(start, n));
+        stop = std::max<std::int64_t>(0, std::min(stop, n));
+    } else {
+        start = std::max<std::int64_t>(-1, std::min(start, n - 1));
+        stop = std::max<std::int64_t>(-1, std::min(stop, n - 1));
+    }
+    std::vector<T> result;
+    if (forward) for (auto i = start; i < stop; i += step) result.push_back(values[i]);
+    else for (auto i = start; i > stop; i += step) result.push_back(values[i]);
+    return result;
+}
+template <typename K, typename V, typename H, typename E, typename Q> static V &nx_dict_at(std::unordered_map<K, V, H, E> &values, Q &&key) {
+    K converted = std::forward<Q>(key);
+    auto found = values.find(converted);
+    if (found == values.end()) nx_fail("Dict key not found");
+    return found->second;
+}
+template <typename T, typename H, typename E, typename Q> static void nx_set_remove(std::unordered_set<T, H, E> &values, Q &&value) {
+    T converted = std::forward<Q>(value);
+    if (!values.erase(converted)) nx_fail("Set element not found");
+}
+template <typename T, typename H, typename E, typename Q> static void nx_set_discard(std::unordered_set<T, H, E> &values, Q &&value) {
+    T converted = std::forward<Q>(value);
+    values.erase(converted);
 }
 
 static nx_span_i32 nx_as_span_i32(nx_mutspan_i32 s) { return {s.ptr, s.len}; }
@@ -73,6 +293,80 @@ static std::vector<std::shared_ptr<void>> nx_owners;
 template <typename T> static void nx_keep(std::shared_ptr<T> value) {
     std::lock_guard<std::mutex> lock(nx_owner_mutex);
     nx_owners.push_back(std::move(value));
+}
+static const char *nx_string_keep(std::string value) {
+    auto owner = std::make_shared<std::string>(std::move(value));
+    const char *result = owner->c_str();
+    nx_keep(std::move(owner));
+    return result;
+}
+static const char *nx_string_slice(const char *value, std::int64_t start, std::int64_t stop,
+        std::int64_t step, bool has_start, bool has_stop) {
+    auto chars = nx_slice(value, std::strlen(value), start, stop, step, has_start, has_stop);
+    return nx_string_keep(std::string(chars.begin(), chars.end()));
+}
+static std::string nx_to_string(const char *value) { return value ? value : ""; }
+static std::string nx_to_string(bool value) { return value ? "true" : "false"; }
+template <typename T> static std::string nx_to_string(T value) {
+    std::ostringstream output;
+    output << value;
+    return output.str();
+}
+static const char *nx_string_lower(const char *value) {
+    std::string out(value);
+    for (char &c : out) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    return nx_string_keep(std::move(out));
+}
+static const char *nx_string_upper(const char *value) {
+    std::string out(value);
+    for (char &c : out) c = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
+    return nx_string_keep(std::move(out));
+}
+static const char *nx_string_strip(const char *value) {
+    std::string out(value);
+    const auto begin = out.find_first_not_of(" \t\r\n");
+    if (begin == std::string::npos) return nx_string_keep("");
+    const auto end = out.find_last_not_of(" \t\r\n");
+    return nx_string_keep(out.substr(begin, end - begin + 1));
+}
+static const char *nx_string_replace(const char *value, const char *old_value, const char *new_value) {
+    std::string out(value), needle(old_value), replacement(new_value);
+    if (needle.empty()) nx_fail("replace requires a nonempty search string");
+    std::size_t offset = 0;
+    while ((offset = out.find(needle, offset)) != std::string::npos) {
+        out.replace(offset, needle.size(), replacement);
+        offset += replacement.size();
+    }
+    return nx_string_keep(std::move(out));
+}
+static std::vector<const char *> nx_string_split(const char *value, const char *delimiter) {
+    std::string text(value), separator(delimiter);
+    if (separator.empty()) nx_fail("split requires a nonempty separator");
+    std::vector<const char *> out;
+    std::size_t start = 0, pos;
+    while ((pos = text.find(separator, start)) != std::string::npos) {
+        out.push_back(nx_string_keep(text.substr(start, pos - start)));
+        start = pos + separator.size();
+    }
+    out.push_back(nx_string_keep(text.substr(start)));
+    return out;
+}
+static const char *nx_adopt_py_string(char *raw) {
+    if (!raw) nx_fail("Python string call failed");
+    std::unique_ptr<char, void(*)(void*)> allocation(raw, std::free);
+    auto owner = std::make_shared<std::string>(allocation.get());
+    const char *value = owner->c_str();
+    nx_keep(std::move(owner));
+    return value;
+}
+static std::unique_ptr<nx_buffer<double>> nx_buffer_from_py(nx_mutspan_f64 raw) {
+    if (raw.len == std::numeric_limits<std::size_t>::max() ||
+        raw.len > static_cast<std::size_t>(std::numeric_limits<std::int64_t>::max()) ||
+        (raw.len && !raw.ptr)) nx_fail("Python buffer call failed");
+    std::unique_ptr<double, void(*)(void*)> allocation(raw.ptr, std::free);
+    auto owner = std::make_unique<nx_buffer<double>>(static_cast<std::int64_t>(raw.len));
+    if (raw.len) std::copy(allocation.get(), allocation.get() + raw.len, owner->data());
+    return owner;
 }
 template <typename T> static std::pair<T *, std::size_t> nx_make_storage(std::initializer_list<T> values) {
     auto owner = std::make_shared<std::vector<T>>(values);

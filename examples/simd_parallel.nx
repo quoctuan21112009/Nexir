@@ -1,0 +1,10 @@
+@cap("memory.alloc")
+fn main() -> i32:
+    data = zeros_f64(16)
+    for i in parallel_range(16):
+        data[i] = f64(i) * 2.0
+    left: SIMD[f64, 4] = SIMD[f64, 4](1.0, 2.0, 3.0, 4.0)
+    right: SIMD[f64, 4] = SIMD[f64, 4](2.0, 2.0, 2.0, 2.0)
+    result = left * right
+    print(data[7], result[2], len(result))
+    return 0

@@ -1,5 +1,9 @@
 # Nexir CPython bridge (initial supported slice)
 
+NX 1.2 also supports [`@py_call` wrappers](features-1.2.md) with `str` and
+`owned[Buffer[f64]]` results. The declarations below describe the original
+numeric C ABI functions.
+
 This feature embeds CPython into a native Nexir executable. Nexir still owns the
 hot loops and numeric work; use one boundary crossing to hand a completed
 `Span[f64]`/`MutSpan[f64]` batch to Python for an operation that needs an
@@ -70,6 +74,11 @@ library, the Python standard library, `ml_worker.py`, NumPy, sklearn, and their
 native dependencies at runtime. `--python-preload` imports modules early; it
 does not package them. Copying only `python3xx.dll` is not sufficient to make
 NumPy/sklearn portable to a machine without their dependencies.
+
+On Windows, add the directory containing the matching `python3xx.dll` to the
+runtime process's `PATH` (for example, `py -3 -c "import sys; print(sys.base_prefix)"`).
+Put the worker module in the current directory or on `PYTHONPATH`. A missing
+DLL can cause the executable to exit before Nexir can print an error.
 
 ## Current limitations and follow-up work
 

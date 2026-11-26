@@ -7,5 +7,7 @@ __pycache__/
 .pytest_cache/
 build/
 dist/
-release/
+release/*
+!release/nexir-windows-1.2.0.zip
+.build-env/
 UNKNOWN.egg-info/

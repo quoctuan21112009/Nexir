@@ -38,6 +38,12 @@ function activate(context) {
   };
 
   context.subscriptions.push(vscode.commands.registerCommand('nexir.runFile', () => run()));
+  context.subscriptions.push(vscode.commands.registerCommand('nexir.enableFileIcons', async () => {
+    await vscode.workspace.getConfiguration('workbench').update(
+      'iconTheme', 'nexir-file-icons', vscode.ConfigurationTarget.Global
+    );
+    vscode.window.showInformationMessage('Nexir file icons are enabled in Explorer.');
+  }));
   context.subscriptions.push(vscode.languages.registerCodeLensProvider(
     { language: 'nexir', scheme: 'file' },
     { provideCodeLenses(document) {

@@ -1,14 +1,20 @@
-# NX 1.0
+# NX 1.2
 
 ![Biểu tượng NX](nexir/assets/nx-logo.svg)
 
 NX là ngôn ngữ lập trình mục đích chung, biên dịch tệp `.nx` thành chương trình native qua C++17. Trình biên dịch kiểm tra cú pháp, kiểu và quyền `@cap` trước khi gọi Clang++ hoặc G++. Cú pháp hiện dùng Python AST để phân tích thụt lề; chương trình đã biên dịch không cần Python khi chạy.
 
-Xem [hướng dẫn cú pháp NX 1.0](docs/syntax.md) để viết hàm, dùng kiểu dữ liệu, mảng, vòng lặp, quyền và liên kết mã native.
+Xem [hướng dẫn cú pháp NX](docs/syntax.md), [các tính năng NX 1.1](docs/features-1.1.md) và [Buffer, Python, SIMD của NX 1.2](docs/features-1.2.md).
+
+Xem [hướng dẫn đầy đủ trên Windows](docs/huong-dan-day-du.md) để tạo một `nx.exe`, cài vào PATH, cài extension VS Code/Antigravity, tải thư viện C++/Python và dùng bộ nhớ an toàn trong phạm vi NX hiện hỗ trợ.
+
+[Tải NX 1.2 cho Windows](release/nexir-windows-1.2.0.zip) — gói ZIP chứa `nx.exe`, extension VS Code/Antigravity, ví dụ và tài liệu.
 
 ## Bắt đầu
 
 Cần Python 3.10+ và compiler C++17 (`clang++` hoặc `g++`). Trên Windows có thể dùng `py -3 -m nexir` ngay trong thư mục này:
+
+Nếu muốn dùng compiler CLI dạng một file thực thi, chạy `.\scripts\build-windows.ps1` rồi `.\scripts\install-windows.ps1`; máy chạy `nx.exe` không cần cài Python để phân tích `.nx`, nhưng vẫn cần C++ compiler để build/run. `--python` cần một bản CPython bên ngoài.
 
 ```powershell
 py -3 -m nexir doctor
@@ -25,6 +31,8 @@ Cài CLI bằng `py -3 -m pip install -e .` để dùng lệnh `nx` và `nexir`.
 - Kiểu: `i32`, `i64`, `f32`, `f64`, `bool`, `str`, `dyn`, `void`.
 - Mảng số: `Span[T]` chỉ đọc và `MutSpan[T]` đọc/ghi; phép truy cập `data[i]` kiểm tra biên.
 - Hàm, suy luận kiểu biến cục bộ, số học, so sánh, `if`, `while`, `for ... in range(...)`, `break`, `continue`, `return`, `print`.
+- `struct` với phương thức/RAII, `owned`/`borrowed`/`mut`, `fn` tĩnh, generic kiểu, trait cơ bản, `SIMD[T,N]`, `parallel_range` và `Result[T]`/`raises`/`try` theo [phạm vi NX 1.1](docs/features-1.1.md).
+- `owned[Buffer[T]]` cho bộ nhớ động có RAII, `@py_call` tự sinh wrapper Python và intrinsics AVX2/SSE2 cho [các trường hợp SIMD hỗ trợ](docs/features-1.2.md).
 - `Ring[f64]` với kiểm tra chỉ số và thế hệ khi đọc dữ liệu cũ.
 - `@export` tạo ký hiệu C ABI trong thư viện chia sẻ. `@extern("symbol")` khai báo hàm C ABI ngoài. CLI hỗ trợ `--cpp`, `--include-dir`, `--library-dir`, `--library` và `--object` để liên kết mã native.
 
@@ -66,6 +74,10 @@ py -3 benchmarks/bench.py
 
 ## Giới hạn
 
-NX 1.0 là compiler đang phát triển, chưa có đầy đủ ownership/borrow checking, sandbox runtime, generic functions, backend GPU hoặc cấu hình freestanding cho PLC. Kiểm tra biên áp dụng cho phép truy cập mảng trong mã NX; mã ngoài qua FFI phải tự bảo đảm con trỏ hợp lệ. `dyn` là tagged value 16 byte, nhưng điều đó không bảo đảm một lệnh SIMD hay độ an toàn tương đương Rust. C++17 và Python là công cụ cần có lúc biên dịch. Không chạy mã NX không tin cậy trên máy sản xuất.
+NX 1.2 là compiler đang phát triển. `owned`, `Buffer` và `trait` hỗ trợ tập con được mô tả trong [tài liệu NX 1.1](docs/features-1.1.md) và [NX 1.2](docs/features-1.2.md); chưa có borrow checker đầy đủ, sandbox runtime, cú pháp truyền đối số generic tường minh, backend GPU hoặc cấu hình freestanding cho PLC. Kiểm tra biên áp dụng cho phép truy cập mảng trong mã NX; mã ngoài qua FFI phải tự bảo đảm con trỏ hợp lệ. SIMD dùng intrinsics ở các nhánh hỗ trợ, không có bảo đảm vector hóa cho mọi kiểu/chiều rộng. C++17 cần có lúc build; `nx.exe` đã đóng gói frontend Python. Không chạy mã NX không tin cậy trên máy sản xuất.
+
+`List`, `Dict`, `Set`, `Tuple`, `Optional`, `import` nội bộ, f-string và vòng `for` trực tiếp có phạm vi cụ thể trong [hướng dẫn NX 1.2](docs/features-1.2.md). Những cú pháp Python như generator, closure và tham số biến đổi chưa được hỗ trợ.
+
+NX 1.2 có `@cpp_header` + `@cpp_fn` để gọi ký hiệu C++ trực tiếp và `@py_fn` để tự bật bridge/preload Python. Ví dụ: [C++ và NumPy trong một file NX](examples/cpp_python_ffi.nx). Các lời gọi cần quyền `ffi.cpp` hoặc `python.interop` tương ứng.
 
 Logo SVG do người dùng cung cấp được lưu tại [nx-logo.svg](nexir/assets/nx-logo.svg); bản PNG và ICO được tạo từ cùng SVG.

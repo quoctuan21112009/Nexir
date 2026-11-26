@@ -1,6 +1,6 @@
-# Hướng dẫn cú pháp NX 1.0
+# Hướng dẫn cú pháp NX 1.2
 
-Tài liệu này mô tả **cú pháp compiler hiện hỗ trợ**. Tệp nguồn có đuôi `.nx`, mã hóa UTF-8 và dùng thụt lề để xác định khối lệnh. Cú pháp nhìn gần với Python, nhưng NX chỉ nhận một tập con được kiểm tra kiểu và biên dịch sang C++17; NX không chạy mã Python.
+Tài liệu này mô tả cú pháp cơ bản từ NX 1.0; xem [NX 1.1](features-1.1.md) và [NX 1.2](features-1.2.md) cho struct, ownership, generic, trait, SIMD, Result, Buffer và Python. Tệp nguồn có đuôi `.nx`, mã hóa UTF-8 và dùng thụt lề để xác định khối lệnh. Cú pháp nhìn gần với Python, nhưng NX chỉ nhận một tập con được kiểm tra kiểu và biên dịch sang C++17; NX không chạy mã Python.
 
 ## 1. Viết và chạy chương trình
 
@@ -24,7 +24,7 @@ nx build hello.nx -o hello.exe
 
 Trên Windows, nếu lệnh `nx` chưa có trong `PATH`, dùng `py -3 -m nexir` thay cho `nx`. `nx doctor` kiểm tra compiler C++17. `nx emit hello.nx -o hello.cpp` ghi mã C++ được sinh ra.
 
-Chỉ **định nghĩa hàm** được đặt ở cấp tệp. Có thể viết chú thích bằng `#`. Không đặt `import`, lớp hay biến toàn cục ở cấp tệp.
+Ở cấp tệp có thể đặt hàm, `struct` và `trait`. Có thể viết chú thích bằng `#`. Không đặt Python `import`, `class` hay biến toàn cục ở cấp tệp.
 
 ## 2. Kiểu dữ liệu
 
@@ -161,9 +161,9 @@ def main():
 
 ## 10. Các giới hạn cú pháp dễ gặp
 
-- Không dùng Python `import`, `class`, `dict`, `tuple`, `lambda`, `try`, `with`, thuộc tính đối tượng hoặc gọi hàm với đối số đặt tên.
-- Không dùng tham số mặc định, `*args`, `**kwargs` hay kiểu generic tùy ý.
-- `str` chưa có các phương thức Python; chuỗi thường không cộng trực tiếp, chỉ hỗ trợ nối khi là `dyn`.
+- NX 1.2 có `import` file `.nx` cùng thư mục, `List`, `Dict`, `Set`, `Tuple`, `Optional`, tham số mặc định hằng số, đối số theo tên, f-string và các phương thức chuỗi thường dùng. Xem [tính năng NX 1.2](features-1.2.md).
+- Chưa dùng Python `class` kế thừa, `lambda`, `with`, `yield`, `*args`, `**kwargs` hoặc import module Python tùy ý. NX có `struct`, RAII và `try/except` cho `Result[T]` theo cú pháp riêng.
+- Compiler dùng cú pháp thụt lề giống Python nhưng bộ sưu tập là kiểu native C++17 được kiểm tra tĩnh; không phải toàn bộ Python.
 - Compiler dùng cú pháp thụt lề giống Python nhưng **không thực thi thư viện Python** từ tệp `.nx`.
 - Mã qua FFI phải tự bảo đảm con trỏ và ABI hợp lệ.
 

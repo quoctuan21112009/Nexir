@@ -1,0 +1,8 @@
+fn add[T: Number](a: T, b: T) -> T:
+    return a + b
+
+
+fn main() -> i32:
+    print(add(2, 3))
+    print(add(1.5, 2.5))
+    return 0

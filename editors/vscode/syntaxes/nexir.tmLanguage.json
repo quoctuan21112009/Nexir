@@ -13,9 +13,9 @@
     "comments": { "patterns": [{ "name": "comment.line.number-sign.nexir", "match": "#.*$" }] },
     "strings": { "name": "string.quoted.double.nexir", "begin": "\"", "end": "\"", "patterns": [{ "name": "constant.character.escape.nexir", "match": "\\\\." }] },
     "decorators": { "patterns": [{ "name": "entity.name.function.decorator.nexir", "match": "@[A-Za-z_][A-Za-z_0-9]*(?:\\([^)]*\\))?" }] },
-    "types": { "patterns": [{ "name": "storage.type.nexir", "match": "\\b(?:i32|i64|f32|f64|bool|str|void|dyn|Span|MutSpan|Ring)(?:\\[[A-Za-z0-9_]+\\])?\\b" }] },
-    "keywords": { "patterns": [{ "name": "keyword.control.nexir", "match": "\\b(?:def|return|if|else|while|for|in|range|break|continue|pass|and|or|not|True|False)\\b" }] },
+    "types": { "patterns": [{ "name": "storage.type.nexir", "match": "\\b(?:i32|i64|f32|f64|bool|str|void|dyn|Span|MutSpan|Buffer|List|Dict|Set|Tuple|Optional|Ring|SIMD|Result|owned|borrowed|mut|Number|Integer|Int|Self)\\b" }] },
+    "keywords": { "patterns": [{ "name": "keyword.control.nexir", "match": "\\b(?:def|fn|struct|trait|import|global|return|raise|raises|try|except|if|else|while|for|in|is|range|parallel_range|break|continue|pass|and|or|not|True|False|None|move)\\b" }] },
     "numbers": { "patterns": [{ "name": "constant.numeric.nexir", "match": "\\b(?:[0-9]+(?:\\.[0-9]*)?|\\.[0-9]+)(?:[eE][+-]?[0-9]+)?\\b" }] },
-    "functions": { "patterns": [{ "name": "entity.name.function.nexir", "match": "(?<=\\bdef )[_A-Za-z][_A-Za-z0-9]*" }] }
+    "functions": { "patterns": [{ "match": "\\b(?:def|fn)\\s+([_A-Za-z][_A-Za-z0-9]*)", "captures": { "1": { "name": "entity.name.function.nexir" } } }] }
   }
 }

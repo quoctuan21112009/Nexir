@@ -1,0 +1,19 @@
+struct Pair:
+    x: i32
+    y: i32
+
+    def __init__(self, x: i32, y: i32):
+        self.x = x
+        self.y = y
+
+    fn total(self) -> i32:
+        return self.x + self.y
+
+    def __del__(self):
+        print("Pair released")
+
+
+fn main() -> i32:
+    pair = Pair(2, 3)
+    print(pair.total())
+    return 0

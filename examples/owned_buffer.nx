@@ -1,0 +1,20 @@
+@cap("memory.alloc")
+fn make_values(count: i64) -> owned[Buffer[f64]]:
+    values = Buffer[f64](count)
+    for i in range(count):
+        values[i] = f64(i) * 2.0
+    return values
+
+
+fn total(values: borrowed[Buffer[f64]]) -> f64:
+    sum: f64 = 0.0
+    for i in range(len(values)):
+        sum += values[i]
+    return sum
+
+
+@cap("memory.alloc")
+fn main() -> i32:
+    values = make_values(4)
+    print(total(values))
+    return 0

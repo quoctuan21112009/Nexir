@@ -1,0 +1,23 @@
+struct Counter:
+    value: i32
+
+    def __del__(self):
+        print("Counter released")
+
+
+fn read(value: borrowed[Counter]) -> i32:
+    return value.value
+
+
+fn increment(value: mut[Counter]) -> void:
+    value.value += 1
+
+
+@cap("memory.alloc")
+fn main() -> i32:
+    item: owned[Counter] = owned(Counter(10))
+    print(read(item))
+    increment(item)
+    moved: owned[Counter] = move(item)
+    print(read(moved))
+    return 0
