@@ -1,0 +1,15 @@
+def sum_values(values: Span[f32]) -> f32:
+    total: f32 = f32(0)
+    for i in range(len(values)):
+        total += values[i]
+    return total
+
+
+@cap("memory.alloc")
+def main():
+    data: MutSpan[f32] = [f32(1.0), f32(2.0), f32(3.0)]
+    data[1] = f32(4.0)
+    print("sum", sum_values(data))
+    buffer = zeros_f32(3)
+    buffer[0] = f32(7.0)
+    print("buffer", buffer[0], len(buffer))

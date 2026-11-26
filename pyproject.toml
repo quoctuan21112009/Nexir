@@ -1,0 +1,19 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "nexir"
+version = "1.0.0"
+description = "NX general-purpose native language compiler"
+requires-python = ">=3.10"
+
+[project.scripts]
+nexir = "nexir.cli:main"
+nx = "nexir.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["nexir*"]
+
+[tool.setuptools.package-data]
+nexir = ["include/*.h", "assets/*.svg", "assets/*.png", "assets/*.ico"]

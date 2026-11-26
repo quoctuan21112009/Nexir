@@ -1,0 +1,10 @@
+def main():
+    value: dyn = 41
+    value = value + 1
+    print(type_name(value), value, as_i64(value))
+    label: dyn = "Ne"
+    label = label + "xir"
+    print(type_name(label), label)
+    number: dyn = 1.25
+    number = number + 2
+    print(type_name(number), as_f64(number))

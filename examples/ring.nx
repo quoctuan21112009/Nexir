@@ -1,0 +1,7 @@
+@cap("memory.alloc")
+def main():
+    frames = ring_f64(4)
+    ring_write(frames, 0, 1.5)
+    print(ring_read(frames, 0), ring_valid(frames, 0))
+    ring_write(frames, 4, 2.5)
+    print(ring_valid(frames, 0), ring_read(frames, 4))

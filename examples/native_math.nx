@@ -1,0 +1,7 @@
+@extern("nx_external_square")
+def square(x: f64) -> f64:
+    pass
+
+
+def main():
+    print(square(3.0))
