@@ -5,13 +5,16 @@ from __future__ import annotations
 import argparse
 import os
 from pathlib import Path
+import re
 import shutil
 import subprocess
 import sys
+import sysconfig
 import tempfile
 
 from . import __version__
 from .compiler import NexirError, compile_file
+from .python_bridge import PYTHON_BRIDGE_CPP
 
 
 def _compiler() -> str:
@@ -34,12 +37,72 @@ def _output_path(source: Path, requested: Path | None, *, shared: bool = False) 
     return output.resolve()
 
 
+def _python_link_settings() -> tuple[Path, Path, str, Path]:
+    """Return CPython include dir, library dir/name, and runtime DLL directory."""
+    include = sysconfig.get_path("include")
+    if not include:
+        raise NexirError("cannot determine Python include directory from sysconfig")
+    if os.name == "nt":
+        version = f"{sys.version_info.major}{sys.version_info.minor}"
+        library_dir = Path(sys.base_prefix) / "libs"
+        library = "python" + version
+        dll_dir = Path(sys.base_prefix)
+    else:
+        library_dir_value = sysconfig.get_config_var("LIBDIR")
+        shared_library = sysconfig.get_config_var("LDLIBRARY") or sysconfig.get_config_var("LIBRARY")
+        if not library_dir_value or not shared_library:
+            raise NexirError("cannot determine Python linker flags from sysconfig")
+        library_dir = Path(library_dir_value)
+        library = shared_library
+        for prefix in ("lib",):
+            if library.startswith(prefix):
+                library = library[len(prefix):]
+                break
+        for suffix in (".dylib", ".so", ".a"):
+            if library.endswith(suffix):
+                library = library[:-len(suffix)]
+                break
+        dll_dir = Path(library_dir_value)
+    if not library_dir.is_dir():
+        raise NexirError(f"Python library directory does not exist: {library_dir}")
+    return Path(include), library_dir, library, dll_dir
+
+
+def _cpp_string(value: str) -> str:
+    return '"' + value.replace("\\", "\\\\").replace('"', '\\"') + '"'
+
+
+def _enable_python_startup(code: str, preload: list[str]) -> str:
+    marker = "int main(void) {"
+    if marker not in code:
+        raise NexirError("cannot locate generated C++ entry point for Python initialization")
+    startup = [
+        'extern "C" void nx_py_initialize(void);',
+        'extern "C" int nx_py_preload(const char*);',
+        marker,
+        "    nx_py_initialize();",
+    ]
+    startup.extend(
+        f"    if (!nx_py_preload({_cpp_string(name)})) return 1;" for name in preload
+    )
+    return code.replace(marker, "\n".join(startup), 1)
+
+
 def _build(source: Path, output: Path, *, emit_c: Path | None = None, shared: bool = False,
            cpp_sources: list[Path] | None = None, include_dirs: list[Path] | None = None,
            library_dirs: list[Path] | None = None, libraries: list[str] | None = None,
            objects: list[Path] | None = None, static_runtime: bool = True,
-           icon: Path | None = None) -> None:
+           icon: Path | None = None, python: bool = False,
+           python_preload: list[str] | None = None) -> None:
     code = compile_file(source)
+    preload = python_preload or []
+    if preload and not python:
+        raise NexirError("--python-preload requires --python")
+    for module in preload:
+        if not re.fullmatch(r"[A-Za-z_]\\w*(?:\\.[A-Za-z_]\\w*)*", module):
+            raise NexirError(f"invalid Python module name for preload: {module!r}")
+    if python:
+        code = _enable_python_startup(code, preload)
     output.parent.mkdir(parents=True, exist_ok=True)
     if emit_c:
         emit_c.parent.mkdir(parents=True, exist_ok=True)
@@ -57,10 +120,24 @@ def _build(source: Path, output: Path, *, emit_c: Path | None = None, shared: bo
             command.append("-static")
         if shared:
             command.extend(["-shared", "-fPIC"])
-        for include_dir in include_dirs or []:
+        effective_includes = list(include_dirs or [])
+        effective_library_dirs = list(library_dirs or [])
+        effective_libraries = list(libraries or [])
+        source_files = list(cpp_sources or [])
+        if python:
+            py_include, py_library_dir, py_library, py_dll_dir = _python_link_settings()
+            effective_includes.append(py_include)
+            effective_library_dirs.append(py_library_dir)
+            effective_libraries.append(py_library)
+            bridge_file = Path(directory) / "nexir_python_bridge.cpp"
+            bridge_file.write_text(PYTHON_BRIDGE_CPP, encoding="utf-8")
+            source_files.append(bridge_file)
+            if os.name == "nt":
+                env["PATH"] = str(py_dll_dir) + os.pathsep + env.get("PATH", "")
+        for include_dir in effective_includes:
             command.extend(["-I", str(include_dir.resolve())])
         command.append(str(c_file))
-        command.extend(str(path.resolve()) for path in cpp_sources or [])
+        command.extend(str(path.resolve()) for path in source_files)
         command.extend(str(path.resolve()) for path in objects or [])
         if os.name == "nt" and not shared:
             icon_file = icon or Path(__file__).parent / "assets" / "nx-icon.ico"
@@ -74,9 +151,9 @@ def _build(source: Path, output: Path, *, emit_c: Path | None = None, shared: bo
                 if icon_result.returncode:
                     raise NexirError("icon resource failed: " + icon_result.stderr.strip())
                 command.append(str(icon_object))
-        for library_dir in library_dirs or []:
+        for library_dir in effective_library_dirs:
             command.extend(["-L", str(library_dir.resolve())])
-        command.extend("-l" + name for name in libraries or [])
+        command.extend("-l" + name for name in effective_libraries)
         if os.name == "nt":
             command.append("-lws2_32")
         command.extend(["-o", str(staged_output)])
@@ -102,6 +179,9 @@ def main(argv: list[str] | None = None) -> int:
     build.add_argument("--object", action="append", type=Path, default=[], help="link a precompiled object, including CUDA objects")
     build.add_argument("--dynamic-runtime", action="store_true", help="do not statically link the C++ runtime on Windows")
     build.add_argument("--icon", type=Path, help="Windows executable icon (.ico)")
+    build.add_argument("--python", action="store_true", help="embed CPython and link the Nexir zero-copy f64 span bridge")
+    build.add_argument("--python-preload", action="append", default=[], metavar="MODULE",
+                       help="import a Python module once at process startup (repeatable; requires --python)")
     check = sub.add_parser("check", help="parse and type-check .nx source")
     check.add_argument("source", type=Path)
     emit = sub.add_parser("emit", help="generate C++17 source without linking")
@@ -145,7 +225,8 @@ def main(argv: list[str] | None = None) -> int:
             _build(source, output, emit_c=args.emit_cpp, shared=args.shared,
                    cpp_sources=args.cpp, include_dirs=args.include_dir,
                    library_dirs=args.library_dir, libraries=args.library, objects=args.object,
-                   static_runtime=not args.dynamic_runtime, icon=args.icon)
+                   static_runtime=not args.dynamic_runtime, icon=args.icon,
+                   python=args.python, python_preload=args.python_preload)
             print(output)
             return 0
         with tempfile.TemporaryDirectory(prefix="nexir-run-") as directory:
