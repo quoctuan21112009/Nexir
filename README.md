@@ -4,6 +4,8 @@
 
 NX là ngôn ngữ lập trình mục đích chung, biên dịch tệp `.nx` thành chương trình native qua C++17. Trình biên dịch kiểm tra cú pháp, kiểu và quyền `@cap` trước khi gọi Clang++ hoặc G++. Cú pháp hiện dùng Python AST để phân tích thụt lề; chương trình đã biên dịch không cần Python khi chạy.
 
+Xem [hướng dẫn cú pháp NX 1.0](docs/syntax.md) để viết hàm, dùng kiểu dữ liệu, mảng, vòng lặp, quyền và liên kết mã native.
+
 ## Bắt đầu
 
 Cần Python 3.10+ và compiler C++17 (`clang++` hoặc `g++`). Trên Windows có thể dùng `py -3 -m nexir` ngay trong thư mục này:
