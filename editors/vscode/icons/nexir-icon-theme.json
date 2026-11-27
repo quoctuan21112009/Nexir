@@ -1,7 +1,17 @@
 {
   "iconDefinitions": {
-    "_nexir": { "iconPath": "./nexir.svg" }
+    "_nexir": { "iconPath": "./nexir.svg" },
+    "_nx_manifest": { "iconPath": "./nexir.svg" }
   },
-  "fileExtensions": { "nx": "_nexir" },
-  "fileNames": { "main.nx": "_nexir" }
+  "fileExtensions": {
+    "nx": "_nexir"
+  },
+  "fileNames": {
+    "main.nx": "_nexir",
+    "nx.toml": "_nx_manifest",
+    "nx.lock": "_nx_manifest"
+  },
+  "languageIds": {
+    "nexir": "_nexir"
+  }
 }

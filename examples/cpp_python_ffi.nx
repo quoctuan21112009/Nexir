@@ -1,21 +1,17 @@
-@cpp_header("cmath")
-@cap("ffi.cpp")
-@cpp_fn("std::hypot")
-fn cpp_hypot(x: f64, y: f64) -> f64:
-    pass
+import cpp.cmath as cmath
 
 @cap("python.interop")
 @py_fn("numpy", "std")
-fn py_std_dev(values: Span[f64]) -> f64:
+def py_std_dev(values: Span[f64]) -> f64:
     pass
 
 @cap("memory.alloc", "ffi.cpp", "python.interop")
-fn main() -> i32:
+def main() -> i32:
     data = zeros_f64(4)
-    data[0] = cpp_hypot(3.0, 4.0)
-    data[1] = cpp_hypot(5.0, 12.0)
-    data[2] = cpp_hypot(8.0, 15.0)
-    data[3] = cpp_hypot(7.0, 24.0)
+    data[0] = cmath.hypot(3.0, 4.0)
+    data[1] = cmath.hypot(5.0, 12.0)
+    data[2] = cmath.hypot(8.0, 15.0)
+    data[3] = cmath.hypot(7.0, 24.0)
     deviation = py_std_dev(data)
     print("Do lech chuan:", deviation)
     return 0

@@ -1,0 +1,13 @@
+import py.math as pymath
+import py.statistics as pystats
+import cpp.cmath as cmath
+
+
+@cap("memory.alloc", "ffi.cpp", "python.interop")
+def main() -> i32:
+    print("C++ hypot(3, 4) =", cmath.hypot(3.0, 4.0))
+    val: f64 = pymath.sqrt(144.0)
+    nums = [10.0, 20.0, 30.0, 40.0]
+    avg: f64 = pystats.mean(nums)
+    print("Python sqrt(144) =", val, "mean =", avg)
+    return 0

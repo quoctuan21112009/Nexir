@@ -11,6 +11,7 @@ class PythonBridgeFrontendTests(unittest.TestCase):
             '@extern("nx_py_call_f64_span")\n'
             'def predict_batch(module: str, function: str, values: Span[f64]) -> f64:\n'
             '    pass\n'
+            '@cap("memory.alloc")\n'
             'def main():\n'
             '    values = [1.0, 2.0]\n'
             '    print(predict_batch("ml_worker", "predict", values))\n'

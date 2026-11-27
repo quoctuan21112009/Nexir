@@ -29,6 +29,7 @@ class ArrayCapabilityTests(unittest.TestCase):
             '    total: f32 = f32(0)\n'
             '    for i in range(len(data)):\n        total += data[i]\n'
             '    return total\n'
+            '@cap("memory.alloc")\n'
             'def main():\n    values = [f32(1), f32(2), f32(3)]\n'
             '    values[1] = f32(4)\n    print(sum_data(values))\n'
         )
@@ -36,21 +37,27 @@ class ArrayCapabilityTests(unittest.TestCase):
         self.assertEqual(result.stdout, "8\n")
 
     def test_bounds_check_read(self):
-        result = self.build_run('def main():\n    values = [1.0, 2.0]\n    print(values[2])\n')
+        result = self.build_run('@cap("memory.alloc")\ndef main():\n    values = [1.0, 2.0]\n    print(values[2])\n')
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("index out of bounds", result.stderr)
 
-    def test_bounds_check_write_negative(self):
-        result = self.build_run('def main():\n    values = [1.0]\n    values[-1] = 4.0\n')
-        self.assertNotEqual(result.returncode, 0)
-        self.assertIn("index out of bounds", result.stderr)
+    def test_bounds_check_negative_indexing_pythonic(self):
+        # Negative indexing on List[T] works like Python! Out-of-bounds negative index fails.
+        result = self.build_run('@cap("memory.alloc")\ndef main():\n    values = [1.0, 4.0]\n    print(values[-1])\n')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout, "4\n")
+        bad = self.build_run('@cap("memory.alloc")\ndef main():\n    values = [1.0]\n    values[-2] = 4.0\n')
+        self.assertNotEqual(bad.returncode, 0)
+        self.assertIn("index out of bounds", bad.stderr)
 
     def test_readonly_span_cannot_be_mutated(self):
         self.reject('def change(data: Span[f32]):\n    data[0] = f32(2)\ndef main():\n    pass\n', "assignment requires MutSpan")
 
-    def test_nested_array_cannot_escape_scope(self):
-        self.reject('def main():\n    data = [1.0]\n    if True:\n        data = [2.0]\n',
-                    "cannot rebind an outer Span")
+    def test_buffer_view_cannot_be_stored(self):
+        self.reject(
+            '@cap("memory.alloc")\ndef main():\n    b = Buffer[f64](2)\n    s = buffer_span(b)\n',
+            "Buffer view must be passed directly",
+        )
 
     def test_allocation_requires_cap(self):
         self.reject('def main():\n    data = zeros_f32(3)\n', 'memory.alloc')

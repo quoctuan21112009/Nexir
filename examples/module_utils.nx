@@ -1,2 +1,2 @@
-fn twice(value: i32) -> i32:
+def twice(value: i32) -> i32:
     return value * 2

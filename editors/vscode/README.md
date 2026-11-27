@@ -1,27 +1,16 @@
-# Nexir VS Code / Antigravity support
+# Nexir VS Code / Antigravity Language & Icon Extension (2.0.0)
 
-This extension adds `.nx` syntax coloring, a Nexir file icon theme, a Run button in
-the editor title bar, and a `Run Nexir` CodeLens above the source. It uses VS
-Code's task API and passes the active file as a separate process argument.
-Version 0.2 highlights NX 1.1 declarations (`fn`, `struct`, `trait`), ownership,
-SIMD, parallel loops and Result error syntax.
-Version 0.3 also highlights `Buffer[T]` and supports running files with `@py_call`.
+Provides:
+- `.nx` file icon recognition in Explorer folder trees (both via language icon metadata on default themes and the dedicated `Nexir File Icons` icon theme for `.nx`, `main.nx`, `nx.toml`, `nx.lock`).
+- Syntax highlighting for NX 2.0 (`class`, `def`, `async`/`await`, `enum`, `match`/`case`, `with`, `i8..i128`, `u8..u128`, `@cap`, etc.).
+- One-click Run and Debug buttons in the editor title bar, CodeLens, and Explorer folder context menu (`right-click .nx file`).
+- Windows Explorer `.nx` folder icon registration via `nx icon register` (or Command Palette `Nexir: Register .nx Icon in Windows Explorer`).
 
-## Run from the extension source
+## Quick Install
 
-1. Open this repository in VS Code or an extension-compatible editor.
-2. Open `editors/vscode` as an extension development host (or use **Run Extension**
-   from a VS Code extension-development launch configuration).
-3. Set `nexir.runCommand` to the Nexir executable available on your PATH, then
-   open a `.nx` file and click **Run Nexir**.
-4. If you launch Nexir through `py -3 -m nexir`, make a small wrapper script and
-   set `nexir.runCommand` to that script; the setting intentionally accepts one
-   executable, not shell text.
+```powershell
+py -3 -m nexir icon install-editor
+py -3 -m nexir icon register
+```
 
-To package it, run `npx @vscode/vsce package` in this directory and install the
-resulting VSIX. Run **Nexir: Enable Nexir File Icons** from the Command Palette to show `.nx` icons in Explorer. The icon theme is named **Nexir File Icons**; select it in
-Preferences → File Icon Theme.
-
-Antigravity support depends on its version supporting VS Code extensions and
-extension-host APIs. The extension does not edit editor internals or inject
-commands into terminals.
+Or run `Nexir: Enable Nexir File Icons` from the editor Command Palette to activate the `Nexir File Icons` theme.

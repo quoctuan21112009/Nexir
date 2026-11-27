@@ -1,10 +1,10 @@
-fn checked_div(value: i32) -> i32 raises:
+def checked_div(value: i32) -> i32 raises:
     if value == 0:
         raise "division by zero"
     return 10 / value
 
 
-fn main() -> i32:
+def main() -> i32:
     try:
         answer = checked_div(2)
         print(answer)

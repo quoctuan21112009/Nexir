@@ -1,0 +1,28 @@
+import nx.asyncio as aio
+import nx.thread as th
+import nx.gpu as gpu
+
+
+@cap("memory.alloc")
+async def worker_task(x: i64) -> i64:
+    await aio.sleep(5)
+    return x * x
+
+
+@cap("memory.alloc", "gpu.compute")
+async def run_pipeline() -> i32:
+    f1 = worker_task(3)
+    f2 = worker_task(4)
+    a, b = aio.gather(f1, f2)
+    print("Async gather:", a + b, "CPU cores:", th.cpu_count(), "GPU backend:", gpu.backend_name())
+
+    vec_a = gpu.to_device([1.0, 2.0, 3.0, 4.0])
+    vec_b = gpu.to_device([10.0, 20.0, 30.0, 40.0])
+    dot = gpu.reduce_sum(gpu.mul(vec_a, vec_b))
+    print("GPU/SIMD dot sum:", dot)
+    return 0
+
+
+@cap("memory.alloc", "gpu.compute")
+def main() -> i32:
+    return aio.run(run_pipeline())

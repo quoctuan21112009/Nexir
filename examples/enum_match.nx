@@ -1,0 +1,22 @@
+enum Shape:
+    Circle(radius: f64)
+    Rect(w: f64, h: f64)
+    Point
+
+    def area(self) -> f64:
+        match self:
+            case Shape.Circle(r):
+                return 3.14159265358979 * r * r
+            case Shape.Rect(w, h):
+                return w * h
+            case Shape.Point:
+                return 0.0
+
+
+@cap("memory.alloc")
+def main() -> i32:
+    c = Shape.Circle(2.0)
+    r = Shape.Rect(3.0, 4.0)
+    p = Shape.Point
+    print(f"Circle={c.area():.2f}, Rect={r.area():.1f}, Point={p.area()}")
+    return 0

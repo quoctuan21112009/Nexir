@@ -1,0 +1,12 @@
+def add_128(a: i128, b: i32) -> i128:
+    return a + b
+
+
+def main() -> i32:
+    big: i128 = 170141183460469231731687303715884105720
+    small: i32 = 7
+    total = add_128(big, small)
+    narrow: i32 = i32(123)
+    wide: i64 = narrow
+    print("i128:", total, "i64:", wide)
+    return 0

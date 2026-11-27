@@ -1,5 +1,5 @@
 @cap("memory.alloc")
-fn greet(name: str = "NX") -> str:
+def greet(name: str = "NX") -> str:
     return f"Xin chao {name}!"
 
 @cap("memory.alloc")

@@ -1,5 +1,5 @@
 @cap("memory.alloc")
-fn main() -> i32:
+def main() -> i32:
     data = zeros_f64(16)
     for i in parallel_range(16):
         data[i] = f64(i) * 2.0

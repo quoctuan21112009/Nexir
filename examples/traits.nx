@@ -1,20 +1,20 @@
 trait HasValue:
-    fn value(self) -> i32:
+    def value(self) -> i32:
         pass
 
 
-struct NumberBox:
+class NumberBox:
     number: i32
 
-    fn value(self) -> i32:
+    def value(self) -> i32:
         return self.number
 
 
-fn twice[T: HasValue](item: T) -> i32:
+def twice[T: HasValue](item: T) -> i32:
     return item.value() + item.value()
 
 
-fn main() -> i32:
+def main() -> i32:
     box = NumberBox(21)
     print(twice(box))
     return 0

@@ -65,4 +65,6 @@ if (-not $SkipEditors -and (Test-Path -LiteralPath $Vsix)) {
     }
 }
 Write-Host "Installed $destination"
+& $destination icon register
+& $destination icon install-editor
 Write-Host 'Open a new terminal, then run: nx doctor'

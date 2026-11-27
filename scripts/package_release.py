@@ -5,7 +5,7 @@ from zipfile import ZIP_DEFLATED, ZipFile
 
 ROOT = Path(__file__).resolve().parents[1]
 RELEASE = ROOT / "release"
-VERSION = "1.2.0"
+VERSION = "2.0.0"
 exe = RELEASE / "nx.exe"
 if not exe.is_file():
     raise SystemExit(f"Build nx.exe first: {exe}")
@@ -18,9 +18,12 @@ files = [
     ROOT / "docs" / "huong-dan-day-du.md",
     ROOT / "docs" / "features-1.1.md",
     ROOT / "docs" / "features-1.2.md",
+    ROOT / "docs" / "features-2.0.md",
     ROOT / "docs" / "syntax.md",
     ROOT / "docs" / "python-c-api.md",
+    ROOT / "docs" / "package-ecosystem.md",
     ROOT / "nexir" / "include" / "nx_value_wire.h",
+    ROOT / "nexir" / "include" / "nx_native_abi.h",
 ]
 files += list((ROOT / "examples").glob("*.nx"))
 files += [ROOT / "examples" / "native_math.cpp", ROOT / "examples" / "nx_worker.py", ROOT / "examples" / "nx_py_worker.py"]

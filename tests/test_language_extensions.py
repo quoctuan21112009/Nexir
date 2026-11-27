@@ -38,45 +38,43 @@ class LanguageExtensionTests(unittest.TestCase):
             compile_source(source)
         self.assertIn(fragment, str(error.exception))
 
-    def test_fn_requires_return_annotation(self):
-        self.assert_rejected('fn main():\n    pass\n', 'explicit return type')
-
-    def test_fn_rejects_dynamic_local(self):
-        self.assert_rejected('fn main() -> i32:\n    item: dyn = 1\n    return 0\n', 'cannot use dyn')
+    def test_fn_and_struct_rejected(self):
+        self.assert_rejected('fn main() -> i32:\n    return 0\n', 'fn has been removed')
+        self.assert_rejected('struct S:\n    x: i32\ndef main():\n    pass\n', 'struct has been replaced by class')
 
     def test_owned_use_after_move(self):
         self.assert_rejected(
-            'struct Box:\n    value: i32\n'
-            '@cap("memory.alloc")\nfn main() -> i32:\n'
+            'class Box:\n    value: i32\n'
+            '@cap("memory.alloc")\ndef main() -> i32:\n'
             '    first = owned(Box(1))\n    second = move(first)\n'
             '    print(first.value)\n    return 0\n', 'use after move')
 
     def test_borrowed_cannot_mutate(self):
         self.assert_rejected(
-            'struct Box:\n    value: i32\n'
-            'fn change(box: borrowed[Box]) -> void:\n    box.value = 2\n'
-            'fn main() -> i32:\n    return 0\n', 'read-only')
+            'class Box:\n    value: i32\n'
+            'def change(box: borrowed[Box]) -> void:\n    box.value = 2\n'
+            'def main() -> i32:\n    return 0\n', 'read-only')
 
     def test_conflicting_borrows_in_one_call(self):
         self.assert_rejected(
-            'struct Box:\n    value: i32\n'
-            'fn both(a: mut[Box], b: borrowed[Box]) -> void:\n    pass\n'
-            'fn main() -> i32:\n    item = Box(1)\n'
+            'class Box:\n    value: i32\n'
+            'def both(a: mut[Box], b: borrowed[Box]) -> void:\n    pass\n'
+            'def main() -> i32:\n    item = Box(1)\n'
             '    both(item, item)\n    return 0\n', 'conflicting borrows')
 
     def test_trait_mismatch(self):
         self.assert_rejected(
-            'trait HasValue:\n    fn value(self) -> i32:\n        pass\n'
-            'struct Empty:\n    number: i32\n'
-            'fn read[T: HasValue](item: T) -> i32:\n    return item.value()\n'
-            'fn main() -> i32:\n    print(read(Empty(1)))\n    return 0\n',
+            'trait HasValue:\n    def value(self) -> i32:\n        pass\n'
+            'class Empty:\n    number: i32\n'
+            'def read[T: HasValue](item: T) -> i32:\n    return item.value()\n'
+            'def main() -> i32:\n    print(read(Empty(1)))\n    return 0\n',
             'does not implement trait')
 
     def test_generic_simd_width_mismatch(self):
         self.assert_rejected(
-            'fn add[T: Number, size: Int](a: SIMD[T, size], b: SIMD[T, size]) -> SIMD[T, size]:\n'
+            'def add[T: Number, size: Int](a: SIMD[T, size], b: SIMD[T, size]) -> SIMD[T, size]:\n'
             '    return a + b\n'
-            'fn main() -> i32:\n'
+            'def main() -> i32:\n'
             '    x = SIMD[f64, 2](1.0, 2.0)\n'
             '    y = SIMD[f64, 3](1.0, 2.0, 3.0)\n'
             '    z = add(x, y)\n    return 0\n',
@@ -84,17 +82,17 @@ class LanguageExtensionTests(unittest.TestCase):
 
     def test_parallel_cannot_break(self):
         self.assert_rejected(
-            'fn main() -> i32:\n    for i in parallel_range(10):\n'
+            'def main() -> i32:\n    for i in parallel_range(10):\n'
             '        break\n    return 0\n', 'cannot return, break or continue')
 
     def test_parallel_cannot_change_shared_scalar(self):
         self.assert_rejected(
-            'fn main() -> i32:\n    total = 0\n'
+            'def main() -> i32:\n    total = 0\n'
             '    for i in parallel_range(10):\n        total += i\n'
             '    return total\n', 'cannot assign shared variables')
 
     def test_raise_requires_raises(self):
-        self.assert_rejected('fn main() -> i32:\n    raise "bad"\n', 'raise requires a raises function')
+        self.assert_rejected('def main() -> i32:\n    raise "bad"\n', 'raise requires a raises function')
 
 
 if __name__ == '__main__':

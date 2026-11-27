@@ -13,9 +13,9 @@
     "comments": { "patterns": [{ "name": "comment.line.number-sign.nexir", "match": "#.*$" }] },
     "strings": { "name": "string.quoted.double.nexir", "begin": "\"", "end": "\"", "patterns": [{ "name": "constant.character.escape.nexir", "match": "\\\\." }] },
     "decorators": { "patterns": [{ "name": "entity.name.function.decorator.nexir", "match": "@[A-Za-z_][A-Za-z_0-9]*(?:\\([^)]*\\))?" }] },
-    "types": { "patterns": [{ "name": "storage.type.nexir", "match": "\\b(?:i32|i64|f32|f64|bool|str|void|dyn|Span|MutSpan|Buffer|List|Dict|Set|Tuple|Optional|Ring|SIMD|Result|owned|borrowed|mut|Number|Integer|Int|Self)\\b" }] },
-    "keywords": { "patterns": [{ "name": "keyword.control.nexir", "match": "\\b(?:def|fn|struct|trait|import|global|return|raise|raises|try|except|if|else|while|for|in|is|range|parallel_range|break|continue|pass|and|or|not|True|False|None|move)\\b" }] },
+    "types": { "patterns": [{ "name": "storage.type.nexir", "match": "\\b(?:i8|i16|i32|i64|i128|u8|u16|u32|u64|u128|f32|f64|int|float|bool|str|void|dyn|Span|MutSpan|Buffer|List|Dict|Set|Tuple|Optional|Ring|SIMD|Result|Future|Channel|Mutex|GpuBuffer|StringBuilder|File|FileInfo|TcpStream|TcpListener|HttpResponse|ThreadPool|AtomicI64|owned|borrowed|mut|Number|Integer|Int|Self)\\b" }] },
+    "keywords": { "patterns": [{ "name": "keyword.control.nexir", "match": "\\b(?:def|async|await|class|enum|trait|import|from|as|global|return|raise|raises|try|except|finally|match|case|with|del|if|else|elif|while|for|in|is|range|parallel_range|break|continue|pass|and|or|not|True|False|None|move|enumerate|zip)\\b" }] },
     "numbers": { "patterns": [{ "name": "constant.numeric.nexir", "match": "\\b(?:[0-9]+(?:\\.[0-9]*)?|\\.[0-9]+)(?:[eE][+-]?[0-9]+)?\\b" }] },
-    "functions": { "patterns": [{ "match": "\\b(?:def|fn)\\s+([_A-Za-z][_A-Za-z0-9]*)", "captures": { "1": { "name": "entity.name.function.nexir" } } }] }
+    "functions": { "patterns": [{ "match": "\\b(?:async\\s+)?def\\s+([_A-Za-z][_A-Za-z0-9]*)", "captures": { "1": { "name": "entity.name.function.nexir" } } }] }
   }
 }

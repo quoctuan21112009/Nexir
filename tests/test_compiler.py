@@ -1,7 +1,6 @@
 import os
 from pathlib import Path
 import subprocess
-import sys
 import tempfile
 import unittest
 
@@ -25,10 +24,14 @@ class FrontendTests(unittest.TestCase):
         self.assert_rejected('def main():\n    mystery()\n', "unknown function")
 
     def test_unsupported_decorator(self):
-        self.assert_rejected('@agent.action\ndef main():\n    pass\n', "supported decorators")
+        self.assert_rejected('@agent.action\ndef main():\n    pass\n', "unsupported decorator")
 
-    def test_reject_python_import(self):
-        self.assert_rejected('import os\ndef main():\n    pass\n', "only function definitions")
+    def test_reject_unknown_import(self):
+        self.assert_rejected('import nonexistent_mod_xyz\ndef main():\n    pass\n', "module not found")
+
+    def test_reject_struct_and_fn(self):
+        self.assert_rejected('struct S:\n    x: i32\ndef main():\n    pass\n', "struct has been replaced by class")
+        self.assert_rejected('fn main() -> i32:\n    return 0\n', "fn has been removed")
 
     def test_undefined_variable(self):
         self.assert_rejected('def main():\n    print(x)\n', "unknown variable")
@@ -39,8 +42,9 @@ class FrontendTests(unittest.TestCase):
     def test_void_value_cannot_be_assigned(self):
         self.assert_rejected('def f():\n    pass\ndef main():\n    x = f()\n', "cannot assign a void result")
 
-    def test_unsupported_class(self):
-        self.assert_rejected('class C:\n    pass\ndef main():\n    pass\n', "only function definitions")
+    def test_class_is_supported(self):
+        code = compile_source('class C:\n    x: i32\ndef main():\n    c = C(1)\n    print(c.x)\n')
+        self.assertIn("struct nx_C", code)
 
     def test_break_outside_loop(self):
         self.assert_rejected('def main():\n    break\n', "break is only valid inside a loop")
@@ -59,7 +63,6 @@ class NativeTests(unittest.TestCase):
             path.write_text(source, encoding="utf-8")
             output = Path(directory) / ("test.exe" if os.name == "nt" else "test")
             _build(path, output)
-            # This process executes the native binary directly, without importing NEXIR.
             env = os.environ.copy()
             env.pop("PYTHONPATH", None)
             proc = subprocess.run([str(output)], capture_output=True, text=True, env=env)
@@ -115,7 +118,7 @@ class NativeTests(unittest.TestCase):
 
     def test_strings_booleans_and_float(self):
         stdout, _ = self.build_and_run(
-            'def main():\n    print("a\\\"b", "a" == "a", 1.5 + 2.0)\n'
+            'def main():\n    print("a\\"b", "a" == "a", 1.5 + 2.0)\n'
         )
         self.assertEqual(stdout, 'a"b true 3.5\n')
 

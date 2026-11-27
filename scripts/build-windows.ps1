@@ -18,7 +18,9 @@ if ($LASTEXITCODE -ne 0) { throw 'Could not install build dependencies.' }
 
 & $venvPython -m PyInstaller --noconfirm --clean --onefile --console --name nx `
     --icon (Join-Path $root 'nexir\assets\nx-icon.ico') `
-    --collect-data nexir --distpath $release --workpath $work --specpath $work `
+    --collect-data nexir `
+    --add-data "$(Join-Path $root 'editors\vscode');editors\vscode" `
+    --distpath $release --workpath $work --specpath $work `
     --paths $root (Join-Path $root 'scripts\nx_entry.py')
 if ($LASTEXITCODE -ne 0) { throw 'PyInstaller build failed.' }
 & (Join-Path $release 'nx.exe') --version

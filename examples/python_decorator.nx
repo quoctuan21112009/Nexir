@@ -14,7 +14,7 @@ def python_doubles(values: Span[f64]) -> owned[Buffer[f64]]:
 
 
 @cap("memory.alloc")
-fn main() -> i32:
+def main() -> i32:
     values = Buffer[f64](4)
     for i in range(4):
         values[i] = f64(i + 1)

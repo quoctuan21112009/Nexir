@@ -1,37 +1,53 @@
 {
   "name": "nexir-language",
   "displayName": "Nexir Language Support",
-  "description": "Syntax highlighting and one-click run support for Nexir .nx programs.",
-  "version": "0.3.0",
+  "description": "Syntax highlighting, .nx folder/explorer file icons, and one-click run/debug support for Nexir 2.0 (.nx).",
+  "version": "2.0.0",
   "publisher": "quoctuan21112009",
+  "icon": "./icons/nexir.png",
   "engines": { "vscode": "^1.80.0" },
   "categories": ["Programming Languages", "Other"],
   "main": "./extension.js",
-  "activationEvents": ["onLanguage:nexir", "workspaceContains:*.nx"],
+  "activationEvents": ["onLanguage:nexir", "workspaceContains:*.nx", "onStartupFinished"],
   "contributes": {
     "languages": [{
       "id": "nexir",
       "aliases": ["Nexir", "nx"],
       "extensions": [".nx"],
+      "icon": {
+        "light": "./icons/nexir.svg",
+        "dark": "./icons/nexir.svg"
+      },
       "configuration": "./language-configuration.json"
     }],
     "grammars": [{ "language": "nexir", "scopeName": "source.nexir", "path": "./syntaxes/nexir.tmLanguage.json" }],
     "commands": [
       { "command": "nexir.runFile", "title": "Run Nexir File", "category": "Nexir", "icon": "$(play)" },
-      { "command": "nexir.enableFileIcons", "title": "Enable Nexir File Icons", "category": "Nexir" }
+      { "command": "nexir.debugFile", "title": "Debug Nexir File", "category": "Nexir", "icon": "$(debug-alt)" },
+      { "command": "nexir.enableFileIcons", "title": "Enable Nexir File Icons", "category": "Nexir" },
+      { "command": "nexir.registerWindowsIcon", "title": "Register .nx Icon in Windows Explorer", "category": "Nexir" }
     ],
     "menus": {
-      "editor/title": [{ "command": "nexir.runFile", "when": "editorLangId == nexir", "group": "navigation@1" }],
+      "editor/title": [
+        { "command": "nexir.runFile", "when": "editorLangId == nexir || resourceExtname == .nx", "group": "navigation@1" },
+        { "command": "nexir.debugFile", "when": "editorLangId == nexir || resourceExtname == .nx", "group": "navigation@2" }
+      ],
+      "explorer/context": [
+        { "command": "nexir.runFile", "when": "resourceExtname == .nx", "group": "navigation@1" },
+        { "command": "nexir.debugFile", "when": "resourceExtname == .nx", "group": "navigation@2" }
+      ],
       "commandPalette": [
-        { "command": "nexir.runFile", "when": "editorLangId == nexir" },
-        { "command": "nexir.enableFileIcons" }
+        { "command": "nexir.runFile", "when": "editorLangId == nexir || resourceExtname == .nx" },
+        { "command": "nexir.debugFile", "when": "editorLangId == nexir || resourceExtname == .nx" },
+        { "command": "nexir.enableFileIcons" },
+        { "command": "nexir.registerWindowsIcon" }
       ]
     },
     "iconThemes": [{ "id": "nexir-file-icons", "label": "Nexir File Icons", "path": "./icons/nexir-icon-theme.json" }],
     "configuration": {
       "title": "Nexir",
       "properties": {
-        "nexir.runCommand": { "type": "string", "default": "nx", "description": "Nexir CLI executable used by the Run button (for example nx or py -3 -m nexir)." }
+        "nexir.runCommand": { "type": "string", "default": "nx", "description": "Nexir CLI executable used by the Run/Debug buttons (for example nx or py -3 -m nexir)." }
       }
     }
   }
