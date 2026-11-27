@@ -22,7 +22,7 @@ import sys
 import tempfile
 from typing import Any
 
-from .compiler import Compiler, NexirError, _normalize_source
+from .compiler import Compiler, NexirError, _normalize_source, compile_file
 
 
 _CTYPES_MAP = {
@@ -78,7 +78,7 @@ class ExportedSymbol:
 
 def inspect_exports(source_path: Path) -> list[ExportedSymbol]:
     source = source_path.read_text(encoding="utf-8")
-    comp = Compiler(source, require_main=False)
+    comp = Compiler(source, entry_path=source_path, require_main=False)
     exports: list[ExportedSymbol] = []
     for name, fn in comp.entry_unit.functions.items():
         if fn.exported:
@@ -138,7 +138,7 @@ class NxModuleProxy:
 
 def import_nx(nx_path: str | Path, *, cache_dir: Path | None = None) -> NxModuleProxy:
     """Compile a `.nx` library and load its @export symbols directly into Python."""
-    from .cli import _build
+    from .cli import _build, _compiler
 
     source = Path(nx_path).resolve()
     if not source.is_file():
@@ -148,9 +148,14 @@ def import_nx(nx_path: str | Path, *, cache_dir: Path | None = None) -> NxModule
         # Auto-check if module has top-level exportable functions; allow explicit @export
         raise NexirError(f"{source.name} has no @export functions for Python import")
 
-    target_dir = cache_dir or (Path(tempfile.gettempdir()) / "nexir_py_cache")
+    target_dir = cache_dir or (Path.home() / ".nexir" / "cache" / "python")
     target_dir.mkdir(parents=True, exist_ok=True)
-    digest = hashlib.sha256(source.read_bytes()).hexdigest()[:12]
+    # Include resolved NX dependencies, generated runtime, and compiler identity.
+    compiler = Path(_compiler()).resolve()
+    stat = compiler.stat()
+    generated = compile_file(source, require_main=False)
+    identity = f"{source}|{compiler}|{stat.st_size}|{stat.st_mtime_ns}|{sys.platform}|{sys.version}"
+    digest = hashlib.sha256((identity + "\\n" + generated).encode("utf-8")).hexdigest()
     suffix = ".dll" if os.name == "nt" else (".dylib" if sys.platform == "darwin" else ".so")
     out_lib = target_dir / f"{source.stem}_{digest}{suffix}"
     if not out_lib.is_file():

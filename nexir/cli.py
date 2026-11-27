@@ -13,6 +13,7 @@ import sys
 import tempfile
 
 from . import __version__
+from .build_cache import cached_object
 from .compiler import NexirError, compile_file
 from .docs_gen import generate_docs, serve_docs
 from .ecosystem import ecosystem_command
@@ -99,6 +100,8 @@ def _build(
     strict_sandbox: bool = False,
     allowed_py_modules: set[str] | None = None,
     audit_log_out: Path | None = None,
+    profile: str = "balanced",
+    use_cache: bool = True,
 ) -> Path | None:
     audit = CompileAuditLog()
     code = compile_file(
@@ -137,15 +140,19 @@ def _build(
         if os.name == "nt":
             env["PATH"] = str(Path(compiler).resolve().parent) + os.pathsep + env.get("PATH", "")
 
-        opt_flags = ["-g", "-O0", "-DNX_DEBUG=1"] if debug else ["-O2"]
+        profiles = {"balanced": "-O2", "fast": "-O3", "size": "-Os"}
+        if profile not in profiles:
+            raise NexirError(f"unknown optimization profile: {profile}")
+        opt_flags = ["-g", "-O0", "-DNX_DEBUG=1"] if debug else [profiles[profile]]
         command = [compiler, "-std=c++17", *opt_flags, "-Wall", "-Wextra", "-Wno-unused-function", "-Wno-unknown-pragmas"]
+        if not debug and not sanitize and profile == "size" and not shared:
+            command.extend(["-ffunction-sections", "-fdata-sections"])
         if sanitize and os.name != "nt":
             command.extend(["-fsanitize=address,undefined", "-fno-omit-frame-pointer"])
         if "g++" in Path(compiler).name:
             command.append("-fopenmp-simd")
         if os.name != "nt":
             command.append("-pthread")
-            command.append("-ldl")
         if os.name == "nt" and static_runtime and not shared:
             command.append("-static")
         if shared:
@@ -173,7 +180,18 @@ def _build(
                 env["PATH"] = str(py_dll_dir) + os.pathsep + env.get("PATH", "")
         for include_dir in effective_includes:
             command.extend(["-I", str(include_dir.resolve())])
-        command.append(str(c_file))
+        # Cache generated translation units separately; external sources still use
+        # the normal compiler path, preserving their include and __FILE__ semantics.
+        if use_cache and not debug and not sanitize:
+            compile_flags = [flag for flag in command[1:] if flag not in {"-shared", "-static"}]
+            generated = [c_file] + ([bridge] if python else [])
+            for index, unit in enumerate(generated):
+                obj = cached_object(compiler, compile_flags, unit, Path(directory) / f"nx-unit-{index}.o", env)
+                command.append(str(obj))
+            if python:
+                source_files.remove(bridge)
+        else:
+            command.append(str(c_file))
         command.extend(str(path.resolve()) for path in source_files)
         command.extend(str(path.resolve()) for path in objects or [])
         if os.name == "nt" and not shared:
@@ -191,6 +209,10 @@ def _build(
         command.extend("-l" + name for name in effective_libraries)
         if os.name == "nt":
             command.append("-lws2_32")
+        else:
+            command.append("-ldl")
+        if not debug and not sanitize and profile == "size" and not shared:
+            command.append("-Wl,-dead_strip" if sys.platform == "darwin" else "-Wl,--gc-sections")
         command.extend(["-o", str(staged_output)])
         result = subprocess.run(command, capture_output=True, text=True, errors="replace", env=env)
         if result.returncode:
@@ -209,6 +231,7 @@ def _add_sandbox_args(p: argparse.ArgumentParser) -> None:
     p.add_argument("--allow-host", action="append", default=[], help="allow network host")
     p.add_argument("--deny-net", action="store_true", help="deny all network access")
     p.add_argument("--deny-fs", action="store_true", help="deny all filesystem access")
+    p.add_argument("--deny-ffi", action="store_true", help="deny runtime dynamic native library loading (not linked native code)")
     p.add_argument("--allow-py", action="append", default=[], help="allowlist Python modules")
     p.add_argument("--audit-log", type=Path, help="write JSONL module/sandbox audit log")
     p.add_argument("--audit-stderr", action="store_true", help="print audit log lines to stderr")
@@ -234,6 +257,8 @@ def _apply_sandbox_env(args: argparse.Namespace, env: dict[str, str]) -> None:
         env["NX_DENY_NET"] = "1"
     if getattr(args, "deny_fs", False):
         env["NX_DENY_FS"] = "1"
+    if getattr(args, "deny_ffi", False):
+        env["NX_DENY_FFI"] = "1"
     if getattr(args, "allow_py", None):
         env["NX_ALLOW_PY_MODULES"] = ";".join(args.allow_py)
     if getattr(args, "audit_log", None):
@@ -354,6 +379,8 @@ def main(argv: list[str] | None = None) -> int:
     build.add_argument("--shared", action="store_true")
     build.add_argument("--no-main", action="store_true")
     build.add_argument("--debug", "-g", action="store_true")
+    build.add_argument("--profile", choices=["balanced", "fast", "size"], default="balanced")
+    build.add_argument("--no-cache", action="store_true", help="bypass native object cache")
     build.add_argument("--sanitize", action="store_true")
     build.add_argument("--cpp", action="append", type=Path, default=[])
     build.add_argument("--include-dir", action="append", type=Path, default=[])
@@ -380,6 +407,8 @@ def main(argv: list[str] | None = None) -> int:
     run = sub.add_parser("run", help="compile and run .nx source")
     run.add_argument("source", type=Path)
     run.add_argument("--debug", "-g", action="store_true")
+    run.add_argument("--profile", choices=["balanced", "fast", "size"], default="balanced")
+    run.add_argument("--no-cache", action="store_true", help="bypass native object cache")
     _add_sandbox_args(run)
     run.add_argument("args", nargs=argparse.REMAINDER)
 
@@ -425,6 +454,13 @@ def main(argv: list[str] | None = None) -> int:
     for action in ("install", "remove"):
         cmd = cpp_sub.add_parser(action); cmd.add_argument("package"); cmd.add_argument("--triplet")
     cpp_path = cpp_sub.add_parser("path"); cpp_path.add_argument("--triplet")
+
+    rust_pkg = pkg_sub.add_parser("rust", help="build a Cargo C-ABI library")
+    rust_sub = rust_pkg.add_subparsers(dest="action", required=True)
+    rust_build = rust_sub.add_parser("build")
+    rust_build.add_argument("--manifest", type=Path, default=Path("Cargo.toml"))
+    rust_build.add_argument("--target", help="explicit Rust target triple")
+    rust_build.add_argument("--offline", action="store_true")
 
     nx_pkg = pkg_sub.add_parser("nx", help="manage Nexir-native packages & lockfiles")
     nx_sub = nx_pkg.add_subparsers(dest="action", required=True)
@@ -501,6 +537,8 @@ def main(argv: list[str] | None = None) -> int:
                 require_main=not (args.shared or args.no_main),
                 debug=args.debug,
                 sanitize=args.sanitize,
+                profile=args.profile,
+                use_cache=not args.no_cache,
                 strict_sandbox=args.sandbox,
                 allowed_py_modules=set(args.allow_py) if args.allow_py else None,
                 audit_log_out=args.audit_log,
@@ -517,6 +555,8 @@ def main(argv: list[str] | None = None) -> int:
                     source,
                     output,
                     debug=is_dbg,
+                    profile=getattr(args, "profile", "balanced"),
+                    use_cache=not getattr(args, "no_cache", False),
                     strict_sandbox=args.sandbox,
                     allowed_py_modules=set(args.allow_py) if args.allow_py else None,
                     audit_log_out=args.audit_log,

@@ -124,6 +124,11 @@ PyObject* load_module(const char* name) {
 }
 
 PyObject* load_function(const char* module_name, const char* function_name) {
+    // A cached callable must not bypass a later sandbox policy check.
+    if (g_sandbox_module_check && !g_sandbox_module_check(module_name)) {
+        PyErr_Format(PyExc_PermissionError, "sandbox denied Python module: %s", module_name);
+        return nullptr;
+    }
     const std::string key = std::string(module_name) + "\n" + function_name;
     {
         std::lock_guard<std::mutex> lock(bridge_mu);
@@ -392,7 +397,23 @@ NxAbiWireVal invoke_callable(PyObject *callable, std::size_t argc, const NxAbiWi
         err.payload.ptr = dup_cstr("callable is null", 16);
         return err;
     }
-    std::size_t pos_count = argc >= kw_count ? (argc - kw_count) : 0;
+    if (kw_count > argc || (argc && !argv) || (kw_count && !kw_names)) {
+        err.payload.ptr = dup_cstr("invalid ABI arguments", 21);
+        return err;
+    }
+    PyObject *res = nullptr;
+    // Most scalar calls have few positional arguments; vectorcall avoids tuple allocation.
+    if (kw_count == 0 && argc <= 8) {
+        PyObject *items[8]{};
+        std::size_t i = 0;
+        for (; i < argc; ++i) {
+            items[i] = abi_to_py(argv[i]);
+            if (!items[i]) break;
+        }
+        if (i == argc) res = PyObject_Vectorcall(callable, items, argc, nullptr);
+        while (i) Py_DECREF(items[--i]);
+    } else {
+    std::size_t pos_count = argc - kw_count;
     PyObject *args_tuple = PyTuple_New(static_cast<Py_ssize_t>(pos_count));
     if (!args_tuple) {
         err.payload.ptr = dup_cstr("failed to allocate tuple", 24);
@@ -406,17 +427,21 @@ NxAbiWireVal invoke_callable(PyObject *callable, std::size_t argc, const NxAbiWi
     PyObject *kwargs_dict = nullptr;
     if (kw_count > 0 && kw_names) {
         kwargs_dict = PyDict_New();
+        if (!kwargs_dict) { Py_DECREF(args_tuple); PyErr_Clear(); err.payload.ptr = dup_cstr("kwargs allocation failed", 24); return err; }
         for (std::size_t i = 0; i < kw_count; ++i) {
             PyObject *val = abi_to_py(argv[pos_count + i]);
-            if (val) {
-                PyDict_SetItemString(kwargs_dict, kw_names[i], val);
-                Py_DECREF(val);
+            const int status = val ? PyDict_SetItemString(kwargs_dict, kw_names[i], val) : -1;
+            Py_XDECREF(val);
+            if (status < 0) {
+                Py_DECREF(args_tuple); Py_DECREF(kwargs_dict); report_python_error("keyword conversion failed");
+                err.payload.ptr = dup_cstr("keyword error", 13); return err;
             }
         }
     }
-    PyObject *res = PyObject_Call(callable, args_tuple, kwargs_dict);
+    res = PyObject_Call(callable, args_tuple, kwargs_dict);
     Py_DECREF(args_tuple);
     Py_XDECREF(kwargs_dict);
+    }
     if (!res) {
         PyObject *ptype = nullptr, *pval = nullptr, *ptb = nullptr;
         PyErr_Fetch(&ptype, &pval, &ptb);

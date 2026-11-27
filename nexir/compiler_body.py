@@ -683,9 +683,15 @@ class BodyGenerator:
             arg_vals.append(f"({c}).c_str()" if t == "str" else c)
             arg_types.append("const char *" if t == "str" else self._cpp_type(t))
         ret_nx = expected_hint or "i64"
-        ret_cpp = self._cpp_type(ret_nx)
+        ret_cpp = "const char *" if ret_nx == "str" else self._cpp_type(ret_nx)
         fn_ptr_sig = f"{ret_cpp}(*)({', '.join(arg_types) or 'void'})"
-        call = f"reinterpret_cast<{fn_ptr_sig}>(NxNativeLibLoader::load_symbol({c_string(kind)}, {c_string(lib_name)}, {c_string(sym)}))({', '.join(arg_vals)})"
+        loader_args = f"{c_string(kind)}, {c_string(lib_name)}, {c_string(sym)}"
+        # Static initialization is thread-safe in C++17. Check policy on every
+        # call, but avoid the loader mutex and hash lookup on the hot path.
+        resolved = (f"([]() {{ NxNativeLibLoader::check_allowed({loader_args}); "
+                    f"static auto fn = reinterpret_cast<{fn_ptr_sig}>(NxNativeLibLoader::load_symbol({loader_args})); "
+                    f"return fn; }}())")
+        call = f"{resolved}({', '.join(arg_vals)})"
         if ret_nx == "str":
             return f"NxStr({call})", "str"
         return call, ret_nx

@@ -217,11 +217,14 @@ static nx_ring_ref_f64 nx_ring_new_f64(std::int64_t capacity) {
 // ============================================================================
 class NxNativeLibLoader {
 public:
-    static void *load_symbol(const char *kind, const char *lib_name, const char *symbol) {
+    static void check_allowed(const char *kind, const char *lib_name, const char *symbol) {
         if (NxSandbox::instance().deny_ffi) {
             nx_audit_log_event("sandbox.deny", kind, lib_name, symbol, false);
             nx_fail("sandbox: native FFI loading denied");
         }
+    }
+    static void *load_symbol(const char *kind, const char *lib_name, const char *symbol) {
+        check_allowed(kind, lib_name, symbol);
         std::string key = std::string(lib_name) + "::" + symbol;
         std::lock_guard<std::mutex> lock(mu());
         auto &sym_cache = symbols();

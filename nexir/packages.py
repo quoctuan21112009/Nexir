@@ -100,6 +100,23 @@ def package_command(args) -> None:
         _run(command)
         return
 
+    if args.kind == "rust":
+        cargo = shutil.which("cargo")
+        if not cargo:
+            raise NexirError("Cargo is required to build Rust libraries")
+        manifest = args.manifest.resolve()
+        if manifest.name != "Cargo.toml" or not manifest.is_file():
+            raise NexirError(f"Cargo manifest not found: {manifest}")
+        command = [cargo, "build", "--release", "--locked", "--manifest-path", str(manifest)]
+        if args.target:
+            if not TRIPLET.fullmatch(args.target):
+                raise NexirError("invalid Rust target triple")
+            command.extend(["--target", args.target])
+        if args.offline:
+            command.append("--offline")
+        _run(command)
+        return
+
     root = vcpkg_root()
     if args.action == "bootstrap":
         if root.exists():
