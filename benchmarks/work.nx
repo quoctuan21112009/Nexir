@@ -1,9 +1,0 @@
-def compute(n: i64) -> i64:
-    x: i64 = 1
-    for i in range(n):
-        x = (x * 1664525 + 1013904223) % 2147483647
-    return x
-
-
-def main():
-    print(compute(20000000))

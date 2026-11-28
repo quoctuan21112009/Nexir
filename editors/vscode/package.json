@@ -1,8 +1,8 @@
 {
   "name": "nexir-language",
   "displayName": "Nexir Language Support",
-  "description": "Syntax highlighting, .nx folder/explorer file icons, and one-click run/debug support for Nexir 2.0 (.nx).",
-  "version": "2.0.0",
+  "description": "Syntax highlighting, .nx folder/explorer file icons, and one-click run/debug support for Nexir 3.0 (.nx).",
+  "version": "3.0.0",
   "publisher": "quoctuan21112009",
   "icon": "./icons/nexir.png",
   "engines": { "vscode": "^1.80.0" },

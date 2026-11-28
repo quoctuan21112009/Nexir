@@ -1,8 +1,9 @@
-"""Command line interface for the NEXIR 2.0 native compiler, debugger, sandbox & package manager."""
+"""Command line interface for the NEXIR 3.0 native compiler, debugger, sandbox & package manager."""
 
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -13,12 +14,15 @@ import sys
 import tempfile
 
 from . import __version__
+from .cache_mgr import CacheManager, compile_asm_and_link
 from .compiler import NexirError, compile_file
 from .docs_gen import generate_docs, serve_docs
 from .ecosystem import ecosystem_command
 from .interop import generate_bindings
+from .llvm_backend import build_with_llvm, compile_to_llvm_ir, find_llvm_tools
 from .packages import cpp_prefix, default_triplet, package_command, python_info
 from .python_bridge import PYTHON_BRIDGE_CPP
+from .repl import run_repl
 from .security import CompileAuditLog
 
 
@@ -99,7 +103,29 @@ def _build(
     strict_sandbox: bool = False,
     allowed_py_modules: set[str] | None = None,
     audit_log_out: Path | None = None,
+    backend: str = "cpp",
+    emit_llvm: Path | None = None,
+    emit_asm: Path | None = None,
+    incremental: bool = False,
+    profile: str | None = None,
 ) -> Path | None:
+    if backend == "llvm":
+        ll_text = compile_to_llvm_ir(source.read_text(encoding="utf-8"), entry_path=source, require_main=require_main)
+        if emit_llvm:
+            emit_llvm.parent.mkdir(parents=True, exist_ok=True)
+            emit_llvm.write_text(ll_text, encoding="utf-8")
+        output.parent.mkdir(parents=True, exist_ok=True)
+        with tempfile.TemporaryDirectory(prefix="nexir-llvm-", dir=output.parent) as ldir:
+            ll_file = Path(ldir) / "program.ll"
+            ll_file.write_text(ll_text, encoding="utf-8")
+            if emit_asm:
+                build_with_llvm(ll_file, emit_asm, emit_asm=True)
+            build_with_llvm(ll_file, output, emit_asm=False)
+        return None
+    if emit_llvm:
+        emit_llvm.parent.mkdir(parents=True, exist_ok=True)
+        emit_llvm.write_text(compile_to_llvm_ir(source.read_text(encoding="utf-8"), entry_path=source, require_main=require_main), encoding="utf-8")
+
     audit = CompileAuditLog()
     code = compile_file(
         source,
@@ -137,7 +163,20 @@ def _build(
         if os.name == "nt":
             env["PATH"] = str(Path(compiler).resolve().parent) + os.pathsep + env.get("PATH", "")
 
-        opt_flags = ["-g", "-O0", "-DNX_DEBUG=1"] if debug else ["-O2"]
+        if debug:
+            opt_flags = ["-g", "-O0", "-DNX_DEBUG=1"]
+        elif profile == "max":
+            opt_flags = ["-O3", "-flto"]
+        elif profile == "native":
+            opt_flags = ["-O3", "-march=native"]
+        elif profile == "portable":
+            opt_flags = ["-O2", "-mtune=generic"]
+        elif profile == "small":
+            opt_flags = ["-Os", "-s"]
+        elif profile == "secure":
+            opt_flags = ["-O2", "-D_FORTIFY_SOURCE=2", "-fstack-protector-strong"]
+        else:
+            opt_flags = ["-O2"]
         command = [compiler, "-std=c++17", *opt_flags, "-Wall", "-Wextra", "-Wno-unused-function", "-Wno-unknown-pragmas"]
         if sanitize and os.name != "nt":
             command.extend(["-fsanitize=address,undefined", "-fno-omit-frame-pointer"])
@@ -191,6 +230,29 @@ def _build(
         command.extend("-l" + name for name in effective_libraries)
         if os.name == "nt":
             command.append("-lws2_32")
+        if (backend == "asm" or emit_asm is not None or incremental) and not shared and not python and not source_files and not objects:
+            extra_link_flags = []
+            if os.name == "nt" and static_runtime:
+                extra_link_flags.append("-static")
+            for library_dir in effective_library_dirs:
+                extra_link_flags.extend(["-L", str(library_dir.resolve())])
+            extra_link_flags.extend("-l" + name for name in effective_libraries)
+            if os.name == "nt":
+                extra_link_flags.append("-lws2_32")
+            if os.name == "nt" and icon is None and Path(directory, "icon.o").is_file():
+                extra_link_flags.append(str(Path(directory, "icon.o")))
+            compile_asm_and_link(
+                compiler,
+                c_file,
+                staged_output,
+                include_dirs=effective_includes,
+                extra_flags=extra_link_flags,
+                emit_asm_path=emit_asm,
+                incremental=incremental or backend == "asm",
+                source_text=source.read_text(encoding="utf-8", errors="ignore"),
+            )
+            os.replace(staged_output, output)
+            return runtime_python_dir
         command.extend(["-o", str(staged_output)])
         result = subprocess.run(command, capture_output=True, text=True, errors="replace", env=env)
         if result.returncode:
@@ -343,14 +405,26 @@ def _handle_icon_command(args: argparse.Namespace) -> None:
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(prog="nexir", description="NEXIR 2.0 native compiler & ecosystem")
+    parser = argparse.ArgumentParser(prog="nexir", description="NEXIR 3.0 native compiler & ecosystem")
     parser.add_argument("--version", action="version", version=f"NEXIR {__version__}")
-    sub = parser.add_subparsers(dest="command", required=True)
+    sub = parser.add_subparsers(dest="command", required=False)
 
     build = sub.add_parser("build", help="compile .nx to native executable or shared library")
     build.add_argument("source", type=Path)
     build.add_argument("-o", "--output", type=Path)
     build.add_argument("--emit-cpp", "--emit-c", dest="emit_cpp", type=Path)
+    build.add_argument("--emit-llvm", type=Path)
+    build.add_argument("--emit-asm", type=Path)
+    build.add_argument("--backend", choices=["cpp", "llvm", "asm"], default="cpp")
+    build.add_argument("--incremental", action="store_true", help="use function-level incremental ASM/object cache")
+    build.add_argument("--auto-install", action="store_true", help="auto-install missing Python/NX dependencies on import")
+    prof_grp = build.add_mutually_exclusive_group()
+    prof_grp.add_argument("--release", action="store_const", const="release", dest="profile")
+    prof_grp.add_argument("--max", action="store_const", const="max", dest="profile")
+    prof_grp.add_argument("--native", action="store_const", const="native", dest="profile")
+    prof_grp.add_argument("--portable", action="store_const", const="portable", dest="profile")
+    prof_grp.add_argument("--small", action="store_const", const="small", dest="profile")
+    prof_grp.add_argument("--secure", action="store_const", const="secure", dest="profile")
     build.add_argument("--shared", action="store_true")
     build.add_argument("--no-main", action="store_true")
     build.add_argument("--debug", "-g", action="store_true")
@@ -372,16 +446,31 @@ def main(argv: list[str] | None = None) -> int:
     check.add_argument("source", type=Path)
     check.add_argument("--audit-log", type=Path)
 
-    emit = sub.add_parser("emit", help="generate C++17 source without linking")
+    emit = sub.add_parser("emit", help="generate C++17 or LLVM IR source without linking")
     emit.add_argument("source", type=Path)
     emit.add_argument("-o", "--output", type=Path, required=True)
+    emit.add_argument("--llvm", action="store_true", help="emit standalone LLVM IR (.ll)")
     emit.add_argument("--debug", "-g", action="store_true")
 
     run = sub.add_parser("run", help="compile and run .nx source")
     run.add_argument("source", type=Path)
     run.add_argument("--debug", "-g", action="store_true")
+    run.add_argument("--backend", choices=["cpp", "llvm", "asm"], default="cpp")
+    run.add_argument("--incremental", action="store_true")
+    run.add_argument("--auto-install", action="store_true")
     _add_sandbox_args(run)
     run.add_argument("args", nargs=argparse.REMAINDER)
+
+    sub.add_parser("repl", help="launch interactive Python-like NEXIR REPL")
+
+    cache_cmd = sub.add_parser("cache", help="manage ASM/incremental/dependency cache")
+    cache_sub = cache_cmd.add_subparsers(dest="action", required=True)
+    cache_sub.add_parser("status", help="show cache size and entry counts")
+    cache_sub.add_parser("clean", help="clear all cached objects, ASM, and downloaded deps")
+    c_prune = cache_sub.add_parser("prune", help="evict LRU entries above --max-mb")
+    c_prune.add_argument("--max-mb", type=float, default=256.0)
+    c_tune = cache_sub.add_parser("tune", help="deduplicate index and optimize cache size")
+    c_tune.add_argument("--max-mb", type=float, default=256.0)
 
     debug_cmd = sub.add_parser("debug", help="compile with debug trace & memory diagnostics and run")
     debug_cmd.add_argument("source", type=Path)
@@ -438,8 +527,37 @@ def main(argv: list[str] | None = None) -> int:
 
     args = parser.parse_args(argv)
     try:
+        def _run_repl_file(src_path: Path) -> None:
+            with tempfile.TemporaryDirectory(prefix="nx-repl-bin-") as rdir:
+                out_exe = Path(rdir) / ("repl.exe" if os.name == "nt" else "repl")
+                py_dir = _build(src_path, out_exe, incremental=True)
+                renv = os.environ.copy()
+                if py_dir is not None and os.name == "nt":
+                    renv["PATH"] = str(py_dir) + os.pathsep + renv.get("PATH", "")
+                subprocess.run([str(out_exe)], env=renv)
+
+        if args.command is None or args.command == "repl":
+            return run_repl(_run_repl_file)
+        if args.command == "cache":
+            mgr = CacheManager()
+            if args.action == "status":
+                print(json.dumps(mgr.status(), indent=2))
+            elif args.action == "clean":
+                print(json.dumps(mgr.clean(), indent=2))
+            elif args.action == "prune":
+                print(json.dumps(mgr.prune(max_mb=args.max_mb), indent=2))
+            elif args.action == "tune":
+                print(json.dumps(mgr.tune(max_mb=args.max_mb), indent=2))
+            return 0
         if args.command == "doctor":
-            print(f"NEXIR {__version__}\nFrontend Python: {sys.version.split()[0]}\nC++17 compiler: {_compiler()}")
+            clang, llc = find_llvm_tools()
+            print(
+                f"NEXIR {__version__}\n"
+                f"Frontend Python: {sys.version.split()[0]}\n"
+                f"C++17 compiler: {_compiler()}\n"
+                f"LLVM tools: clang={clang or 'not found'}, llc={llc or 'not found'}\n"
+                f"Cache dir: {CacheManager().root}"
+            )
             return 0
         if args.command == "pkg":
             ecosystem_command(args) if args.kind == "nx" else package_command(args)
@@ -467,7 +585,7 @@ def main(argv: list[str] | None = None) -> int:
             print(starter)
             return 0
 
-        source = args.source.resolve()
+        source = Path(args.source).resolve()
         if args.command == "check":
             audit = CompileAuditLog()
             compile_file(source, audit_log=audit)
@@ -478,10 +596,15 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "emit":
             output = args.output.resolve()
             output.parent.mkdir(parents=True, exist_ok=True)
-            output.write_text(compile_file(source, debug=args.debug), encoding="utf-8")
+            if getattr(args, "llvm", False):
+                output.write_text(compile_to_llvm_ir(source.read_text(encoding="utf-8"), entry_path=source), encoding="utf-8")
+            else:
+                output.write_text(compile_file(source, debug=args.debug), encoding="utf-8")
             print(output)
             return 0
         if args.command == "build":
+            if getattr(args, "auto_install", False):
+                os.environ["NX_AUTO_INSTALL"] = "1"
             output = _output_path(source, args.output, shared=args.shared)
             _build(
                 source,
@@ -501,16 +624,68 @@ def main(argv: list[str] | None = None) -> int:
                 require_main=not (args.shared or args.no_main),
                 debug=args.debug,
                 sanitize=args.sanitize,
-                strict_sandbox=args.sandbox,
+                strict_sandbox=args.sandbox or (args.profile == "secure"),
                 allowed_py_modules=set(args.allow_py) if args.allow_py else None,
                 audit_log_out=args.audit_log,
+                backend=args.backend,
+                emit_llvm=args.emit_llvm,
+                emit_asm=args.emit_asm,
+                incremental=args.incremental,
+                profile=args.profile,
             )
             if args.emit_bindings:
                 generate_bindings(source, args.emit_bindings, output.parent)
             print(output)
             return 0
         if args.command in {"run", "debug"}:
+            if getattr(args, "auto_install", False):
+                os.environ["NX_AUTO_INSTALL"] = "1"
             is_dbg = args.command == "debug" or getattr(args, "debug", False)
+            backend_kind = getattr(args, "backend", "cpp")
+            if not is_dbg and backend_kind == "cpp" and not getattr(args, "audit_log", None):
+                # Fast binary cache for `nx run`: skip g++ recompilation when generated C++ is unchanged
+                audit = CompileAuditLog()
+                code = compile_file(
+                    source,
+                    debug=False,
+                    audit_log=audit,
+                    strict_sandbox=args.sandbox,
+                    allowed_py_modules=set(args.allow_py) if args.allow_py else None,
+                )
+                uses_py = "/* NX_PY_CALL */" in code
+                cxx = _compiler()
+                cache_key = hashlib.sha256(f"{code}|{cxx}|{args.sandbox}|{__version__}".encode("utf-8")).hexdigest()[:24]
+                mgr = CacheManager()
+                cached_exe = mgr.bin_dir / (f"{cache_key}.exe" if os.name == "nt" else cache_key)
+                python_dll_dir = _python_link_settings()[3] if uses_py else None
+                if not cached_exe.is_file():
+                    mgr.record_miss()
+                    _build(
+                        source,
+                        cached_exe,
+                        debug=False,
+                        strict_sandbox=args.sandbox,
+                        allowed_py_modules=set(args.allow_py) if args.allow_py else None,
+                        backend="cpp",
+                        incremental=getattr(args, "incremental", False),
+                    )
+                    mgr.touch(f"bin:{cache_key}", cached_exe, "bin")
+                else:
+                    mgr.record_hit()
+                    mgr.touch(f"bin:{cache_key}", cached_exe, "bin")
+                env = os.environ.copy()
+                if python_dll_dir is not None:
+                    if os.name == "nt":
+                        clean_path = [p for p in env.get("PATH", "").split(os.pathsep) if "_MEI" not in p]
+                        env["PATH"] = os.pathsep.join([str(python_dll_dir), str(python_dll_dir / "DLLs"), *clean_path])
+                        if getattr(sys, "frozen", False):
+                            import ctypes
+                            ctypes.windll.kernel32.SetDllDirectoryW(None)
+                    env.setdefault("PYTHONHOME", str(python_dll_dir))
+                    env["PYTHONPATH"] = str(source.parent) + os.pathsep + env.get("PYTHONPATH", "")
+                _apply_sandbox_env(args, env)
+                return subprocess.run([str(cached_exe), *args.args], env=env).returncode
+
             with tempfile.TemporaryDirectory(prefix="nexir-run-") as directory:
                 output = Path(directory) / ("program.exe" if os.name == "nt" else "program")
                 python_dll_dir = _build(
@@ -520,11 +695,18 @@ def main(argv: list[str] | None = None) -> int:
                     strict_sandbox=args.sandbox,
                     allowed_py_modules=set(args.allow_py) if args.allow_py else None,
                     audit_log_out=args.audit_log,
+                    backend=backend_kind,
+                    incremental=getattr(args, "incremental", False),
                 )
                 env = os.environ.copy()
                 if python_dll_dir is not None:
                     if os.name == "nt":
-                        env["PATH"] = str(python_dll_dir) + os.pathsep + env.get("PATH", "")
+                        clean_path = [p for p in env.get("PATH", "").split(os.pathsep) if "_MEI" not in p]
+                        env["PATH"] = os.pathsep.join([str(python_dll_dir), str(python_dll_dir / "DLLs"), *clean_path])
+                        if getattr(sys, "frozen", False):
+                            import ctypes
+                            ctypes.windll.kernel32.SetDllDirectoryW(None)
+                    env.setdefault("PYTHONHOME", str(python_dll_dir))
                     env["PYTHONPATH"] = str(source.parent) + os.pathsep + env.get("PYTHONPATH", "")
                 _apply_sandbox_env(args, env)
                 if args.command == "debug":

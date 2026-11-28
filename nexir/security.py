@@ -30,6 +30,25 @@ CAPABILITIES = {
     "env.read",
 }
 
+CAPABILITY_ALIASES = {
+    "all": set(CAPABILITIES),
+    "io": {"filesystem.read", "filesystem.write", "filesystem.copy", "filesystem.delete", "filesystem.admin"},
+    "ffi": {"ffi.c", "ffi.cpp", "ffi.rust", "ffi.go", "python.interop"},
+    "net": {"network.connect", "network.listen", "network.dns"},
+}
+
+
+def expand_capabilities(items: list[str] | tuple[str, ...] | set[str]) -> set[str]:
+    out: set[str] = set()
+    for item in items:
+        if item in CAPABILITY_ALIASES:
+            out.update(CAPABILITY_ALIASES[item])
+        elif item in CAPABILITIES:
+            out.add(item)
+        else:
+            raise ValueError(f"unknown capability '{item}'; allowed: " + ", ".join(sorted(CAPABILITIES)))
+    return out
+
 DANGEROUS_CPP_HEADERS = {
     "windows.h", "winbase.h", "unistd.h", "sys/syscall.h", "spawn.h",
     "dlfcn.h", "process.h", "fcntl.h", "sys/ptrace.h",

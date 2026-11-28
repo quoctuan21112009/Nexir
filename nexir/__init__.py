@@ -1,3 +1,3 @@
-"""NEXIR 2.0 native language compiler and runtime."""
+"""NEXIR 3.0 native language compiler and runtime."""
 
-__version__ = "2.0.0"
+__version__ = "3.0.0"

@@ -5,7 +5,7 @@ from zipfile import ZIP_DEFLATED, ZipFile
 
 ROOT = Path(__file__).resolve().parents[1]
 RELEASE = ROOT / "release"
-VERSION = "2.0.0"
+VERSION = "3.0.0"
 exe = RELEASE / "nx.exe"
 if not exe.is_file():
     raise SystemExit(f"Build nx.exe first: {exe}")

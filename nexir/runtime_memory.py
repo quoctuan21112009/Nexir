@@ -1552,6 +1552,7 @@ static_assert(alignof(NxValue) == 16, "NxValue must be 16-byte aligned");
 static_assert(offsetof(NxValue, data) == 8, "payload offset must be 8");
 
 static inline NxValue nx_box(std::nullptr_t) { return NxValue::null(); }
+static inline NxValue nx_box(std::nullopt_t) { return NxValue::null(); }
 static inline NxValue nx_box(bool b) { return NxValue::boolean(b); }
 static inline NxValue nx_box(std::int8_t n) { return NxValue::integer(n); }
 static inline NxValue nx_box(std::int16_t n) { return NxValue::integer(n); }
@@ -1804,5 +1805,26 @@ static inline void nx_print_value(const NxValue &v) {
     if (v.type == 5) { std::fputs(v.data.i ? "true" : "false", stdout); return; }
     if (v.type == 6) { nx_print_i128(*std::static_pointer_cast<nx_i128>(v.data.ptr->object)); return; }
     std::fputs(nx_as_str(v).c_str(), stdout);
+}
+
+static inline NxStr nx_builtin_input(const NxStr &prompt = NxStr()) {
+    if (!prompt.empty()) {
+        std::fputs(prompt.c_str(), stdout);
+    }
+    std::fflush(stdout);
+    std::string line;
+    char buf[512];
+    while (std::fgets(buf, sizeof(buf), stdin)) {
+        std::size_t n = std::strlen(buf);
+        if (n > 0 && buf[n - 1] == '\n') {
+            --n;
+            if (n > 0 && buf[n - 1] == '\r') --n;
+            line.append(buf, n);
+            break;
+        }
+        line.append(buf, n);
+    }
+    if (!line.empty() && line.back() == '\r') line.pop_back();
+    return NxStr::from_std(line);
 }
 '''

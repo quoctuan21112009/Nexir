@@ -16,6 +16,7 @@ import ast
 from dataclasses import dataclass, field
 import importlib.util
 import io
+import os
 from pathlib import Path
 import re
 import tokenize
@@ -26,6 +27,7 @@ from .runtime_cpp import PRELUDE
 from .security import (
     CAPABILITIES,
     CompileAuditLog,
+    expand_capabilities,
     sha256_file,
     validate_cpp_header,
     validate_ffi_symbol,
@@ -137,7 +139,12 @@ class ModuleUnit:
     enums: dict[str, EnumDefInfo] = field(default_factory=dict)
     classes: dict[str, ClassDefInfo] = field(default_factory=dict)
     globals: dict[str, tuple[str, str]] = field(default_factory=dict)
+    global_inits: list[tuple[str, ast.expr, str]] = field(default_factory=list)
+    top_stmts: list[ast.stmt] = field(default_factory=list)
     functions: dict[str, Function] = field(default_factory=dict)
+    foreign_sigs: dict[tuple[str, str], dict[str, tuple[tuple[str, ...], str]]] = field(default_factory=dict)
+    module_caps: frozenset[str] = field(default_factory=frozenset)
+    is_trusted: bool = False
 
     def cpp_symbol(self, local_name: str) -> str:
         return f"nx_{self.prefix}{local_name}"
@@ -399,7 +406,62 @@ class Compiler:
             fields.append((fn, ft, fn in cls.field_defaults))
         return fields
 
+    @staticmethod
+    def _extract_module_caps(source: str, filename: str | None) -> frozenset[str]:
+        caps: set[str] = set()
+        for lineno, line in enumerate(source.splitlines(), start=1):
+            m = re.match(r'^\s*#!\[cap\(([^)]+)\)\]\s*$', line)
+            if not m:
+                continue
+            items = [it.strip().strip('"').strip("'") for it in m.group(1).split(",") if it.strip()]
+            try:
+                caps.update(expand_capabilities(items))
+            except ValueError as exc:
+                raise NexirError(str(exc), ast.Pass(lineno=lineno, col_offset=0), file=filename) from exc
+        return frozenset(caps)
+
+    @staticmethod
+    def _global_package_roots() -> list[Path]:
+        roots: list[Path] = []
+        nx_path = os.environ.get("NEXIR_PATH", "")
+        for part in nx_path.split(os.pathsep):
+            if part.strip():
+                roots.append(Path(part.strip()).expanduser())
+        if os.name == "nt":
+            local_app = os.environ.get("LOCALAPPDATA")
+            if local_app:
+                roots.append(Path(local_app) / "Programs" / "Nexir" / "packages")
+        roots.append(Path.home() / ".nexir" / "packages")
+        repo_pkgs = Path(__file__).resolve().parent.parent / "packages"
+        if repo_pkgs.is_dir():
+            roots.append(repo_pkgs)
+        return roots
+
+    @classmethod
+    def _is_trusted_path(cls, path: Path | None) -> bool:
+        if path is None:
+            return False
+        resolved = path.resolve()
+        for gr in cls._global_package_roots():
+            try:
+                if gr.exists() and resolved.is_relative_to(gr.resolve()):
+                    return True
+            except OSError:
+                pass
+        for parent in resolved.parents:
+            toml = parent / "nx.toml"
+            if toml.is_file():
+                try:
+                    txt = toml.read_text(encoding="utf-8", errors="ignore")
+                    if re.search(r"(?m)^\s*trusted\s*=\s*true\b", txt):
+                        return True
+                except OSError:
+                    pass
+                break
+        return False
+
     def _load_unit(self, name: str, source: str, path: Path | None, *, prefix: str) -> ModuleUnit:
+        mod_caps = self._extract_module_caps(source, name)
         norm, decls, gens, raises, line_map = _normalize_source(source, filename=name)
         try:
             tree = ast.parse(norm)
@@ -408,6 +470,7 @@ class Compiler:
         unit = ModuleUnit(
             name=name, path=path, prefix=prefix, source=source,
             tree=tree, declarations=decls, generics=gens, raises_lines=raises, line_map=line_map,
+            module_caps=mod_caps, is_trusted=self._is_trusted_path(path),
         )
         if path is not None:
             self._loaded_units[path] = unit
@@ -428,16 +491,21 @@ class Compiler:
             roots.append(base)
         if self.entry_path is not None:
             eroot = self.entry_path.parent
-            roots.extend([eroot, eroot / "src", eroot / "nx_modules", eroot / ".nx" / "packages"])
+            roots.extend([eroot, eroot / "src", eroot / "packages", eroot / "nx_modules", eroot / ".nx" / "packages", eroot / ".nx_pkgs"])
+            if mod_parts:
+                roots.extend([eroot / ".nx_pkgs" / mod_parts[0], eroot / ".nx_pkgs" / mod_parts[0] / "src"])
             # Also search project root if entry is in src/
-            roots.extend([eroot.parent, eroot.parent / "nx_modules", eroot.parent / ".nx" / "packages"])
-        home_pkg = Path.home() / ".nexir" / "packages"
-        if home_pkg.is_dir():
-            roots.append(home_pkg)
-            for pkg_dir in home_pkg.iterdir():
-                if pkg_dir.is_dir():
-                    roots.append(pkg_dir / "src")
-                    roots.append(pkg_dir)
+            roots.extend([eroot.parent, eroot.parent / "packages", eroot.parent / "nx_modules", eroot.parent / ".nx" / "packages", eroot.parent / ".nx_pkgs"])
+        for g_root in self._global_package_roots():
+            if g_root.is_dir():
+                roots.append(g_root)
+                if mod_parts:
+                    roots.append(g_root / mod_parts[0] / "src")
+                    roots.append(g_root / mod_parts[0])
+                for pkg_dir in g_root.iterdir():
+                    if pkg_dir.is_dir():
+                        roots.append(pkg_dir / "src")
+                        roots.append(pkg_dir)
         for root in roots:
             for cand in (root / rel_path, root / pkg_init):
                 if cand.is_file():
@@ -457,6 +525,17 @@ class Compiler:
             except ValueError as exc:
                 self.audit_log.record("module.load", "python", py_mod, str(exc), status="denied")
                 raise NexirError(str(exc), node) from exc
+            root_py = py_mod.split(".")[0]
+            if not self.strict_sandbox and os.environ.get("NX_AUTO_INSTALL", "0") == "1":
+                try:
+                    if importlib.util.find_spec(root_py) is None:
+                        from .interop import auto_install_python_dep
+                        cache_root = (self.entry_path.parent if self.entry_path else Path.cwd()) / ".nx_cache"
+                        installed = auto_install_python_dep(py_mod, cache_root)
+                        if installed is not None:
+                            self.audit_log.record("module.auto_install", "python", py_mod, str(installed), status="allowed")
+                except Exception:
+                    pass
             self.audit_log.record("module.load", "python", py_mod, "cpython-abi", status="allowed")
             return "py", py_mod, None
         # 3. Direct C++ header cpp.*
@@ -467,22 +546,40 @@ class Compiler:
             except ValueError as exc:
                 self.audit_log.record("module.load", "cpp", hdr, str(exc), status="denied")
                 raise NexirError(str(exc), node) from exc
-            self.cpp_headers.add(f'#include "{path}"' if local else f"#include <{path}>")
+            from .interop import auto_discover_foreign_module
+            search_dirs = [d for d in (from_dir, self.entry_path.parent if self.entry_path else None, Path.cwd()) if d]
+            finfo = auto_discover_foreign_module("cpp", path, search_dirs)
+            if finfo["header"] is not None:
+                self.cpp_headers.add(f'#include "{Path(finfo["header"]).resolve()}"')
+                self.entry_unit.foreign_sigs[("cpp", path)] = finfo["signatures"]
+            else:
+                self.cpp_headers.add(f'#include "{path}"' if local else f"#include <{path}>")
             self.audit_log.record("module.load", "cpp", path, "header", status="allowed")
             return "cpp", path, None
-        # 4. Native C / Rust / Go shared library
+        # 4. Native C / Rust / Go shared library (auto-discovers header signatures when present)
         for prefix_lang in ("c.", "rust.", "go."):
             if raw_name.startswith(prefix_lang):
                 kind = prefix_lang[:-1]
                 lib_name = raw_name[len(prefix_lang):]
                 if not re.fullmatch(r"[A-Za-z0-9_.\-]+", lib_name) or ".." in lib_name:
                     raise NexirError(f"invalid {kind} native library name: {lib_name}", node)
+                from .interop import auto_discover_foreign_module
+                search_dirs = [d for d in (from_dir, self.entry_path.parent if self.entry_path else None, Path.cwd()) if d]
+                finfo = auto_discover_foreign_module(kind, lib_name, search_dirs)
+                if finfo["signatures"]:
+                    self.entry_unit.foreign_sigs[(kind, lib_name)] = finfo["signatures"]
                 self.native_libs[lib_name] = kind
                 self.audit_log.record("module.load", kind, lib_name, "shared-lib", status="allowed")
                 return kind, lib_name, None
-        # 5. Local / package .nx file
+        # 5. Local / package .nx file (with auto-fetch from NX_REGISTRY / ~/.nexir/registry)
         parts = [p for p in raw_name.split(".") if p]
         nx_file = self._find_nx_module(parts, from_dir, level) if parts else None
+        if nx_file is None and level == 0 and parts and not self.strict_sandbox:
+            from .interop import auto_install_nx_dep
+            proj_root = self.entry_path.parent if self.entry_path else Path.cwd()
+            if auto_install_nx_dep(parts[0], proj_root) is not None:
+                self.audit_log.record("module.auto_install", "nx", parts[0], str(proj_root / ".nx_pkgs" / parts[0]), status="allowed")
+                nx_file = self._find_nx_module(parts, from_dir, level)
         if nx_file is not None:
             if nx_file in self._loaded_units:
                 return "nx", nx_file.stem, self._loaded_units[nx_file]
@@ -650,41 +747,138 @@ class Compiler:
             self._parse_unit_members(unit)
 
         if self.require_main:
-            if "main" not in self.entry_unit.functions:
-                raise NexirError("program requires def main()")
-            main_fn = self.entry_unit.functions["main"]
-            if main_fn.params or main_fn.result not in {"void", "i32"}:
-                raise NexirError("main must take no arguments and return void or i32", main_fn.node)
+            if "main" in self.entry_unit.functions:
+                main_fn = self.entry_unit.functions["main"]
+                if main_fn.params or main_fn.result not in {"void", "i32"}:
+                    raise NexirError("main must take no arguments and return void or i32", main_fn.node)
+            elif not (self.entry_unit.top_stmts or self.entry_unit.globals or self.entry_unit.global_inits or self.entry_unit.imports):
+                raise NexirError("program requires def main() or top-level statements")
+
+    @staticmethod
+    def _infer_minimal_caps(unit: ModuleUnit, nodes: list[ast.AST]) -> frozenset[str]:
+        """Infer the exact minimal capabilities needed by top-level/global expressions (least privilege)."""
+        caps: set[str] = set(unit.module_caps)
+        for root in nodes:
+            for sub in ast.walk(root):
+                if isinstance(sub, (ast.List, ast.Dict, ast.Set, ast.ListComp, ast.DictComp, ast.JoinedStr)):
+                    caps.add("memory.alloc")
+                elif isinstance(sub, ast.Call):
+                    if isinstance(sub.func, ast.Name):
+                        if sub.func.id in {"input", "str", "owned", "zeros_f32", "zeros_f64", "zeros_i32", "zeros_i64", "ring_f64", "StringBuilder"}:
+                            caps.add("memory.alloc")
+                        elif sub.func.id == "open":
+                            caps.update({"memory.alloc", "filesystem.read"})
+                        elif sub.func.id in unit.functions:
+                            caps.update(unit.functions[sub.func.id].caps)
+                        elif sub.func.id in unit.imported_symbols:
+                            kind, tgt, orig = unit.imported_symbols[sub.func.id]
+                            if kind == "nx" and isinstance(tgt, ModuleUnit) and orig in tgt.functions:
+                                caps.update(tgt.functions[orig].caps)
+                            elif kind == "py":
+                                caps.update({"memory.alloc", "python.interop"})
+                    elif isinstance(sub.func, ast.Attribute) and isinstance(sub.func.value, ast.Name):
+                        head = sub.func.value.id
+                        if head in unit.imports:
+                            imp = unit.imports[head]
+                            if imp.kind == "py":
+                                caps.update({"memory.alloc", "python.interop"})
+                            elif imp.kind in {"c", "cpp", "rust", "go"}:
+                                caps.add(f"ffi.{imp.kind}")
+                            elif imp.kind == "nx_std":
+                                if imp.target_name in {"nx.fs", "nx.io"}:
+                                    caps.update({"memory.alloc", "filesystem.read", "filesystem.write"})
+                                elif imp.target_name == "nx.net":
+                                    caps.update({"memory.alloc", "network.connect", "network.dns", "network.listen"})
+                                elif imp.target_name == "nx.gpu":
+                                    caps.update({"memory.alloc", "gpu.compute"})
+                                elif imp.target_name in {"nx.asyncio", "nx.thread"}:
+                                    caps.add("memory.alloc")
+                            elif imp.kind == "nx" and imp.target_unit is not None and sub.func.attr in imp.target_unit.functions:
+                                caps.update(imp.target_unit.functions[sub.func.attr].caps)
+        return frozenset(caps)
+
+    def _infer_global_from_expr(self, unit: ModuleUnit, expr_node: ast.expr, expected: str | None = None) -> str:
+        from .compiler_body import BodyGenerator
+        dummy_fn = Function(
+            ast.FunctionDef(
+                name="__global_init__",
+                args=ast.arguments(posonlyargs=[], args=[], kwonlyargs=[], kw_defaults=[], defaults=[]),
+                body=[],
+                decorator_list=[],
+            ),
+            (),
+            "void",
+            self._infer_minimal_caps(unit, [expr_node]),
+            False,
+        )
+        gen = BodyGenerator(self, unit, dummy_fn, error_cls=NexirError)
+        if expected is not None:
+            gen.argument(expr_node, expected)
+            return expected
+        _, typ = gen.expr(expr_node)
+        if typ == "void":
+            raise NexirError("cannot initialize global variable with void expression", expr_node)
+        return typ
 
     def _parse_unit_members(self, unit: ModuleUnit) -> None:
-        # 1. File-level globals/constants
+        # 1. File-level scalar constant globals (fast pass so enums/classes/functions can see them)
+        deferred_globals: list[ast.stmt] = []
         for node in unit.tree.body:
-            if not isinstance(node, ast.AnnAssign):
+            if isinstance(node, (ast.Import, ast.ImportFrom, ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef, ast.Pass)):
                 continue
-            if not isinstance(node.target, ast.Name) or node.value is None:
-                raise NexirError("file-level variables require a typed name and constant", node)
-            name = node.target.id
-            self.check_identifier(name, node)
-            typ = resolve_type_node(node.annotation, types=self.types, classes=set(self.classes), enums=set(self.enums), error_cls=NexirError)
-            try:
-                value = ast.literal_eval(node.value)
-            except (ValueError, TypeError, SyntaxError, MemoryError) as exc:
-                raise NexirError("file-level initializer must be a constant", node.value) from exc
-            if type(value) is str and typ == "str":
-                code = f"NxStr::from_literal({c_string(value)}, {len(value.encode('utf-8'))})"
-            elif type(value) is bool and typ == "bool":
-                code = "true" if value else "false"
-            elif type(value) is int and typ in INTEGERS:
-                code = f"{value}LL" if typ in {"i64", "i128"} else str(value)
-            elif type(value) is float and typ in {"f32", "f64"}:
-                code = repr(value)
-            elif value is None and typ.startswith("Optional["):
-                code = "std::nullopt"
+            if isinstance(node, ast.AnnAssign):
+                if not isinstance(node.target, ast.Name) or node.value is None:
+                    raise NexirError("file-level variables require a target name and initializer", node)
+                name = node.target.id
+                self.check_identifier(name, node)
+                typ = resolve_type_node(node.annotation, types=self.types, classes=set(self.classes), enums=set(self.enums), error_cls=NexirError)
+                if name in unit.globals:
+                    raise NexirError(f"duplicate file-level variable: {name}", node)
+                try:
+                    value = ast.literal_eval(node.value)
+                except (ValueError, TypeError, SyntaxError, MemoryError):
+                    deferred_globals.append(node)
+                    unit.globals[name] = (typ, "std::nullopt" if typ.startswith("Optional[") else "{}")
+                    continue
+                if type(value) is str and typ == "str":
+                    code = f"NxStr::from_literal({c_string(value)}, {len(value.encode('utf-8'))})"
+                elif type(value) is bool and typ == "bool":
+                    code = "true" if value else "false"
+                elif type(value) is int and typ in INTEGERS:
+                    code = f"{value}LL" if typ in {"i64", "i128"} else str(value)
+                elif type(value) is float and typ in {"f32", "f64"}:
+                    code = repr(value)
+                elif value is None and typ.startswith("Optional["):
+                    code = "std::nullopt"
+                else:
+                    deferred_globals.append(node)
+                    unit.globals[name] = (typ, "std::nullopt" if typ.startswith("Optional[") else "{}")
+                    continue
+                unit.globals[name] = (typ, code)
+            elif isinstance(node, ast.Assign) and len(node.targets) == 1 and isinstance(node.targets[0], ast.Name):
+                name = node.targets[0].id
+                if name in unit.globals:
+                    # Reassignment of an already declared global belongs to top-level execution
+                    deferred_globals.append(node)
+                    continue
+                self.check_identifier(name, node)
+                try:
+                    value = ast.literal_eval(node.value)
+                except (ValueError, TypeError, SyntaxError, MemoryError):
+                    deferred_globals.append(node)
+                    continue
+                if type(value) is str:
+                    unit.globals[name] = ("str", f"NxStr::from_literal({c_string(value)}, {len(value.encode('utf-8'))})")
+                elif type(value) is bool:
+                    unit.globals[name] = ("bool", "true" if value else "false")
+                elif type(value) is int:
+                    unit.globals[name] = ("i64", f"{value}LL")
+                elif type(value) is float:
+                    unit.globals[name] = ("f64", repr(value))
+                else:
+                    deferred_globals.append(node)
             else:
-                raise NexirError("file-level constant does not match its type", node.value)
-            if name in unit.globals:
-                raise NexirError(f"duplicate file-level variable: {name}", node)
-            unit.globals[name] = (typ, code)
+                deferred_globals.append(node)
 
         # 2. Enums
         for ename, edef in unit.enums.items():
@@ -817,15 +1011,31 @@ class Compiler:
 
         # 4. Functions (`def` and `async def`)
         for node in unit.tree.body:
-            if isinstance(node, (ast.AnnAssign, ast.Import, ast.ImportFrom, ast.ClassDef)):
-                continue
             if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                raise NexirError("only function, class, enum, trait, import, and variable declarations are allowed at module level", node)
+                continue
             self.check_identifier(node.name, node)
             if node.name in unit.functions or node.name in unit.classes or node.name in unit.enums or node.name in unit.traits or node.name in unit.globals:
                 raise NexirError(f"duplicate function: {node.name}", node)
             fn = self._parse_function(node, unit)
             unit.functions[node.name] = fn
+
+        # 5. Deferred non-constant / function-call / untyped globals & top-level statements
+        for node in deferred_globals:
+            if isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name) and node.value is not None:
+                name = node.target.id
+                typ = unit.globals[name][0]
+                self._infer_global_from_expr(unit, node.value, expected=typ)
+                unit.global_inits.append((name, node.value, typ))
+            elif isinstance(node, ast.Assign) and len(node.targets) == 1 and isinstance(node.targets[0], ast.Name):
+                name = node.targets[0].id
+                if name in unit.globals:
+                    unit.top_stmts.append(node)
+                else:
+                    typ = self._infer_global_from_expr(unit, node.value, expected=None)
+                    unit.globals[name] = (typ, "std::nullopt" if typ.startswith("Optional[") else "{}")
+                    unit.global_inits.append((name, node.value, typ))
+            else:
+                unit.top_stmts.append(node)
 
     def _parse_method(self, owner: str, node: ast.FunctionDef, unit: ModuleUnit) -> Function:
         if node.name not in {"__init__", "__del__", "__str__", "__repr__", "__add__", "__sub__", "__mul__", "__truediv__", "__eq__", "__getitem__", "__setitem__", "__len__", "__enter__", "__exit__"}:
@@ -835,14 +1045,19 @@ class Compiler:
         args = node.args
         if args.posonlyargs or args.kwonlyargs or args.vararg or args.kwarg or args.kw_defaults:
             raise NexirError("only positional or default-value method parameters are supported", node)
-        caps: set[str] = set()
+        caps: set[str] = set(unit.module_caps)
         for dec in node.decorator_list:
             if not isinstance(dec, ast.Call) or not isinstance(dec.func, ast.Name) or dec.func.id != "cap" or dec.keywords or not dec.args:
                 raise NexirError("class methods support @cap(...) only", dec)
+            raw_items = []
             for item in dec.args:
-                if not isinstance(item, ast.Constant) or type(item.value) is not str or item.value not in CAPABILITIES:
+                if not isinstance(item, ast.Constant) or type(item.value) is not str:
                     raise NexirError("unknown method capability", item)
-                caps.add(item.value)
+                raw_items.append(item.value)
+            try:
+                caps.update(expand_capabilities(raw_items))
+            except ValueError as exc:
+                raise NexirError(str(exc), dec) from exc
         params = [("self", owner)]
         for arg in args.args[1:]:
             self.check_identifier(arg.arg, arg)
@@ -872,7 +1087,7 @@ class Compiler:
         is_async = isinstance(node, ast.AsyncFunctionDef)
         generic = unit.generics.get(node.lineno, ())
         allowed_generic = dict(generic)
-        caps: set[str] = set()
+        caps: set[str] = set(unit.module_caps)
         exported = False
         extern_symbol = None
         py_call = None
@@ -888,10 +1103,15 @@ class Compiler:
                 label = "cap"
                 if not dec.args:
                     raise NexirError("@cap requires at least one capability", dec)
+                raw_items = []
                 for item in dec.args:
-                    if not isinstance(item, ast.Constant) or type(item.value) is not str or item.value not in CAPABILITIES:
+                    if not isinstance(item, ast.Constant) or type(item.value) is not str:
                         raise NexirError("unknown capability; allowed: " + ", ".join(sorted(CAPABILITIES)), item)
-                    caps.add(item.value)
+                    raw_items.append(item.value)
+                try:
+                    caps.update(expand_capabilities(raw_items))
+                except ValueError as exc:
+                    raise NexirError(str(exc), dec) from exc
             elif isinstance(dec, ast.Call) and isinstance(dec.func, ast.Name) and dec.func.id == "extern" and not dec.keywords:
                 label = "extern"
                 if len(dec.args) != 1 or not isinstance(dec.args[0], ast.Constant) or type(dec.args[0].value) is not str:
@@ -972,6 +1192,7 @@ class Compiler:
                     or type(dv) is int and typ in INTEGERS
                     or type(dv) is float and typ in {"f32", "f64"}
                     or dv is None and typ.startswith("Optional[")
+                    or (typ == "dyn" and (dv is None or type(dv) in {str, bool, int, float}))
                 ):
                     raise NexirError("default must be a constant matching the parameter type", item)
 
@@ -1041,7 +1262,7 @@ class Compiler:
             'extern "C" void nx_py_abi_release_val(NxAbiWireVal*);',
             'extern "C" void *nx_py_abi_import(const char*);',
             "static int nx_py_sandbox_callback(const char *mod) { return NxSandbox::instance().check_py_module(mod) ? 1 : 0; }",
-            "static NxValue nx_py_wire_to_nxvalue(const NxAbiWireVal &w) {",
+            "static NxValue nx_py_wire_to_nxvalue(NxAbiWireVal &w) {",
             "    switch (w.tag) {",
             "        case NX_ABI_T_NULL: return NxValue::null();",
             "        case NX_ABI_T_BOOL: return NxValue::boolean(w.payload.i64 != 0);",
@@ -1054,13 +1275,13 @@ class Compiler:
             "        case NX_ABI_T_F64: return NxValue::floating(w.payload.f64);",
             "        case NX_ABI_T_STR: return NxValue::string(static_cast<const char *>(w.payload.ptr));",
             "        case NX_ABI_T_LIST: {",
-            "            const auto *lst = static_cast<const NxAbiWireList *>(w.payload.ptr);",
+            "            auto *lst = static_cast<NxAbiWireList *>(w.payload.ptr);",
             "            nx_vec<NxValue> out;",
             "            if (lst) { out.reserve(lst->count); for (std::size_t i = 0; i < lst->count; ++i) out.push_back(nx_py_wire_to_nxvalue(lst->items[i])); }",
             "            return NxValue::list(std::move(out));",
             "        }",
             "        case NX_ABI_T_DICT: {",
-            "            const auto *d = static_cast<const NxAbiWireDict *>(w.payload.ptr);",
+            "            auto *d = static_cast<NxAbiWireDict *>(w.payload.ptr);",
             "            nx_map<NxStr, NxValue> out;",
             "            if (d) { for (std::size_t i = 0; i < d->count; ++i) out[NxStr(d->keys[i])] = nx_py_wire_to_nxvalue(d->vals[i]); }",
             "            return NxValue::dict(std::move(out));",
@@ -1068,6 +1289,8 @@ class Compiler:
             "        case NX_ABI_T_PYOBJ: {",
             "            void *obj = w.payload.ptr;",
             "            NxAbiWireVal *owned_box = new NxAbiWireVal(w);",
+            "            w.tag = NX_ABI_T_NULL;",
+            "            w.payload.ptr = nullptr;",
             "            return NxValue::pyobj(std::shared_ptr<void>(obj, [owned_box](void *) { nx_py_abi_release_val(owned_box); delete owned_box; }));",
             "        }",
             '        case NX_ABI_T_ERROR: nx_fail_str(std::string("Python error: ") + (w.payload.ptr ? static_cast<const char*>(w.payload.ptr) : "unknown"));',
@@ -1094,6 +1317,84 @@ class Compiler:
             "    nx_py_abi_release_val(&w);",
             "    return out;",
             "}",
+            "template <typename T> struct nx_is_vec : std::false_type {};",
+            "template <typename E> struct nx_is_vec<nx_vec<E>> : std::true_type {};",
+            "template <typename T> struct nx_is_tuple : std::false_type {};",
+            "template <typename... Args> struct nx_is_tuple<std::tuple<Args...>> : std::true_type {};",
+            "template <typename T> struct nx_is_str_map : std::false_type {};",
+            "template <typename V> struct nx_is_str_map<nx_map<NxStr, V>> : std::true_type {};",
+            "struct NxAbiWireArena {",
+            "    std::vector<std::unique_ptr<NxAbiWireList>> lists;",
+            "    std::vector<std::unique_ptr<NxAbiWireDict>> dicts;",
+            "    std::deque<std::vector<NxAbiWireVal>> item_vecs;",
+            "    std::deque<std::vector<const char*>> key_vecs;",
+            "    std::deque<NxStr> owned_strs;",
+            "    template <typename T>",
+            "    NxAbiWireVal pack(const T &v) {",
+            "        if constexpr (std::is_same_v<T, NxValue>) {",
+            "            if (v.type == 7 && v.data.ptr) {",
+            "                const auto &lst = *std::static_pointer_cast<nx_vec<NxValue>>(v.data.ptr->object);",
+            "                return pack(lst);",
+            "            }",
+            "            if (v.type == 8 && v.data.ptr) {",
+            "                const auto &mp = *std::static_pointer_cast<nx_map<NxStr, NxValue>>(v.data.ptr->object);",
+            "                return pack(mp);",
+            "            }",
+            "            if (v.type == 3 && v.data.ptr) {",
+            "                owned_strs.push_back(*std::static_pointer_cast<NxStr>(v.data.ptr->object));",
+            "                return nx_to_abi_wire(owned_strs.back());",
+            "            }",
+            "            return nx_to_abi_wire(v);",
+            "        } else if constexpr (nx_is_vec<T>::value) {",
+            "            std::vector<NxAbiWireVal> items;",
+            "            items.reserve(v.size());",
+            "            for (const auto &el : v) items.push_back(pack(el));",
+            "            item_vecs.push_back(std::move(items));",
+            "            auto lst = std::make_unique<NxAbiWireList>();",
+            "            lst->count = item_vecs.back().size();",
+            "            lst->items = lst->count ? item_vecs.back().data() : nullptr;",
+            "            NxAbiWireVal w{}; w.tag = NX_ABI_T_LIST; w.payload.ptr = lst.get();",
+            "            lists.push_back(std::move(lst));",
+            "            return w;",
+            "        } else if constexpr (nx_is_tuple<T>::value) {",
+            "            std::vector<NxAbiWireVal> items;",
+            "            items.reserve(std::tuple_size_v<T>);",
+            "            std::apply([&](const auto &... elems) {",
+            "                (items.push_back(pack(elems)), ...);",
+            "            }, v);",
+            "            item_vecs.push_back(std::move(items));",
+            "            auto lst = std::make_unique<NxAbiWireList>();",
+            "            lst->count = item_vecs.back().size();",
+            "            lst->items = lst->count ? item_vecs.back().data() : nullptr;",
+            "            NxAbiWireVal w{}; w.tag = NX_ABI_T_LIST; w.payload.ptr = lst.get();",
+            "            lists.push_back(std::move(lst));",
+            "            return w;",
+            "        } else if constexpr (nx_is_str_map<T>::value) {",
+            "            std::vector<const char*> keys;",
+            "            std::vector<NxAbiWireVal> vals;",
+            "            keys.reserve(v.size()); vals.reserve(v.size());",
+            "            for (const auto &kv : v) {",
+            "                owned_strs.push_back(kv.first);",
+            "                keys.push_back(owned_strs.back().c_str());",
+            "                vals.push_back(pack(kv.second));",
+            "            }",
+            "            key_vecs.push_back(std::move(keys));",
+            "            item_vecs.push_back(std::move(vals));",
+            "            auto d = std::make_unique<NxAbiWireDict>();",
+            "            d->count = key_vecs.back().size();",
+            "            d->keys = d->count ? key_vecs.back().data() : nullptr;",
+            "            d->vals = d->count ? item_vecs.back().data() : nullptr;",
+            "            NxAbiWireVal w{}; w.tag = NX_ABI_T_DICT; w.payload.ptr = d.get();",
+            "            dicts.push_back(std::move(d));",
+            "            return w;",
+            "        } else if constexpr (std::is_same_v<T, NxStr>) {",
+            "            owned_strs.push_back(v);",
+            "            return nx_to_abi_wire(owned_strs.back());",
+            "        } else {",
+            "            return nx_to_abi_wire(v);",
+            "        }",
+            "    }",
+            "};",
             *[f"/* NX_PY_PRELOAD {m} */" for m in sorted(self.py_preloads)],
         ]
 
@@ -1112,10 +1413,11 @@ class Compiler:
                 if cdef.node in unit.tree.body:
                     decl_out.append(f"struct {unit.cpp_symbol(cdef.name)};")
 
-        # Globals
+        # Globals (non-const if runtime-initialized)
+        runtime_init_names = {n for unit in self._unit_order for n, _, _ in unit.global_inits}
         for unit in self._unit_order:
             for name, (typ, value) in unit.globals.items():
-                qualifier = " const" if name.isupper() else ""
+                qualifier = " const" if (name.isupper() and name not in runtime_init_names) else ""
                 decl_out.append(f"static {self.cpp_type(typ)}{qualifier} {unit.cpp_symbol(name)} = {value};")
 
         # Function forward declarations
@@ -1273,6 +1575,41 @@ class Compiler:
                 body_out.extend(body.generate(emit_name, name))
                 body_out.append("")
 
+        # Runtime global initializer (supports untyped & function-call globals)
+        init_lines: list[str] = []
+        for unit in self._unit_order:
+            if not unit.global_inits:
+                continue
+            dummy_fn = Function(
+                ast.FunctionDef(name="__global_init__", args=ast.arguments(posonlyargs=[], args=[], kwonlyargs=[], kw_defaults=[], defaults=[]), body=[], decorator_list=[]),
+                (), "void", self._infer_minimal_caps(unit, [gexpr for _, gexpr, _ in unit.global_inits]), False,
+            )
+            igen = BodyGenerator(self, unit, dummy_fn, error_cls=NexirError)
+            for gname, gexpr, gtyp in unit.global_inits:
+                val_cpp = igen.argument(gexpr, gtyp)
+                init_lines.extend(igen.lines)
+                igen.lines.clear()
+                init_lines.append(f"    {unit.cpp_symbol(gname)} = {val_cpp};")
+        body_out.extend(["static void nx_init_globals(void) {", *init_lines, "}", ""])
+
+        # Synthesize top-level script entrypoint when no def main() or top-level statements exist
+        main_ret_type = "void"
+        has_user_main = "main" in self.entry_unit.functions
+        if has_user_main and not self.entry_unit.top_stmts:
+            main_ret_type = self.entry_unit.functions["main"].result
+        elif self.require_main:
+            if has_user_main and self.entry_unit.top_stmts:
+                # User has both def main() and top-level statements: rename user's nx_main? No, top-level runs via __nx_script_main!
+                pass
+            synth_fn = Function(
+                ast.FunctionDef(name="__top_level__", args=ast.arguments(posonlyargs=[], args=[], kwonlyargs=[], kw_defaults=[], defaults=[]), body=list(self.entry_unit.top_stmts), decorator_list=[]),
+                (), "void", self._infer_minimal_caps(self.entry_unit, list(self.entry_unit.top_stmts)), False,
+            )
+            sgen = BodyGenerator(self, self.entry_unit, synth_fn, error_cls=NexirError)
+            sgen.block(self.entry_unit.top_stmts)
+            entry_sym = "__nx_script_main" if has_user_main else "nx_main"
+            body_out.extend([f"static void {entry_sym}(void) {{", *sgen.lines, "}", ""])
+
         out = ["/* Generated by NEXIR 2.0 C++17 backend. Do not edit. */", *sorted(self.cpp_headers), PRELUDE, ""]
         if self.uses_python:
             out.extend(self._emit_python_abi_cpp())
@@ -1281,10 +1618,11 @@ class Compiler:
 
         if self.require_main:
             hook = "nx_py_abi_sandbox_hook(nx_py_sandbox_callback); " if self.uses_python else ""
-            if self.entry_unit.functions["main"].result == "i32":
-                out.append(f"int main(void) {{ NxDebugMemGuard __nx_dbg_mem; NxSandbox::instance().init_from_env(); {hook}int __rc = nx_main(); NxHybridExecutor::instance().shutdown(); return __rc; }}")
+            call_entry = "__nx_script_main()" if (has_user_main and self.entry_unit.top_stmts) else "nx_main()"
+            if main_ret_type == "i32":
+                out.append(f"int main(void) {{ NxDebugMemGuard __nx_dbg_mem; NxSandbox::instance().init_from_env(); {hook}nx_init_globals(); int __rc = {call_entry}; NxHybridExecutor::instance().shutdown(); return __rc; }}")
             else:
-                out.append(f"int main(void) {{ NxDebugMemGuard __nx_dbg_mem; NxSandbox::instance().init_from_env(); {hook}nx_main(); NxHybridExecutor::instance().shutdown(); return 0; }}")
+                out.append(f"int main(void) {{ NxDebugMemGuard __nx_dbg_mem; NxSandbox::instance().init_from_env(); {hook}nx_init_globals(); {call_entry}; NxHybridExecutor::instance().shutdown(); return 0; }}")
         return "\n".join(out) + "\n"
 
     def _guaranteed_ret(self, nodes: list[ast.stmt]) -> bool:

@@ -1009,18 +1009,187 @@ struct nx_HttpResponse {
     }
 };
 
+static inline nx_result<nx_HttpResponse> nx_https_request_native(
+    const NxStr &method, const std::string &host, int port, const std::string &path,
+    const NxStr &body, const NxStr &content_type) {
+    if (!NxSandbox::instance().check_net("https", host, port))
+        return nx_err<nx_HttpResponse>("sandbox denied https request");
+#ifdef _WIN32
+    HMODULE wh = LoadLibraryA("winhttp.dll");
+    if (!wh) return nx_err<nx_HttpResponse>("failed to load winhttp.dll for native HTTPS");
+    using HINTERNET = void *;
+    using FnOpen = HINTERNET(WINAPI *)(const wchar_t *, unsigned long, const wchar_t *, const wchar_t *, unsigned long);
+    using FnConnect = HINTERNET(WINAPI *)(HINTERNET, const wchar_t *, unsigned short, unsigned long);
+    using FnOpenReq = HINTERNET(WINAPI *)(HINTERNET, const wchar_t *, const wchar_t *, const wchar_t *, const wchar_t *, const wchar_t **, unsigned long);
+    using FnSendReq = int(WINAPI *)(HINTERNET, const wchar_t *, unsigned long, void *, unsigned long, unsigned long, std::uintptr_t);
+    using FnRecvResp = int(WINAPI *)(HINTERNET, void *);
+    using FnQueryHdr = int(WINAPI *)(HINTERNET, unsigned long, const wchar_t *, void *, unsigned long *, unsigned long *);
+    using FnQueryAvail = int(WINAPI *)(HINTERNET, unsigned long *);
+    using FnReadData = int(WINAPI *)(HINTERNET, void *, unsigned long, unsigned long *);
+    using FnClose = int(WINAPI *)(HINTERNET);
+
+    auto pOpen = reinterpret_cast<FnOpen>(reinterpret_cast<void *>(GetProcAddress(wh, "WinHttpOpen")));
+    auto pConnect = reinterpret_cast<FnConnect>(reinterpret_cast<void *>(GetProcAddress(wh, "WinHttpConnect")));
+    auto pOpenReq = reinterpret_cast<FnOpenReq>(reinterpret_cast<void *>(GetProcAddress(wh, "WinHttpOpenRequest")));
+    auto pSendReq = reinterpret_cast<FnSendReq>(reinterpret_cast<void *>(GetProcAddress(wh, "WinHttpSendRequest")));
+    auto pRecvResp = reinterpret_cast<FnRecvResp>(reinterpret_cast<void *>(GetProcAddress(wh, "WinHttpReceiveResponse")));
+    auto pQueryHdr = reinterpret_cast<FnQueryHdr>(reinterpret_cast<void *>(GetProcAddress(wh, "WinHttpQueryHeaders")));
+    auto pQueryAvail = reinterpret_cast<FnQueryAvail>(reinterpret_cast<void *>(GetProcAddress(wh, "WinHttpQueryDataAvailable")));
+    auto pReadData = reinterpret_cast<FnReadData>(reinterpret_cast<void *>(GetProcAddress(wh, "WinHttpReadData")));
+    auto pClose = reinterpret_cast<FnClose>(reinterpret_cast<void *>(GetProcAddress(wh, "WinHttpCloseHandle")));
+    if (!pOpen || !pConnect || !pOpenReq || !pSendReq || !pRecvResp || !pQueryHdr || !pQueryAvail || !pReadData || !pClose) {
+        FreeLibrary(wh);
+        return nx_err<nx_HttpResponse>("winhttp.dll missing required symbols");
+    }
+    auto to_wide = [](const std::string &s) -> std::wstring {
+        if (s.empty()) return std::wstring();
+        int n = MultiByteToWideChar(CP_UTF8, 0, s.c_str(), static_cast<int>(s.size()), nullptr, 0);
+        std::wstring w(static_cast<std::size_t>(n > 0 ? n : 0), L'\0');
+        if (n > 0) MultiByteToWideChar(CP_UTF8, 0, s.c_str(), static_cast<int>(s.size()), w.data(), n);
+        return w;
+    };
+    std::wstring wagent = L"NEXIR/2.0";
+    std::wstring whost = to_wide(host);
+    std::wstring wpath = to_wide(path);
+    std::wstring wmeth = to_wide(std::string(method.view()));
+    std::wstring whdr;
+    if (!body.empty()) {
+        whdr = L"Content-Type: " + to_wide(std::string(content_type.view())) + L"\r\n";
+    }
+    HINTERNET hSession = pOpen(wagent.c_str(), 0 /* WINHTTP_ACCESS_TYPE_DEFAULT_PROXY */, nullptr, nullptr, 0);
+    if (!hSession) { FreeLibrary(wh); return nx_err<nx_HttpResponse>("WinHttpOpen failed"); }
+    HINTERNET hConnect = pConnect(hSession, whost.c_str(), static_cast<unsigned short>(port), 0);
+    if (!hConnect) { pClose(hSession); FreeLibrary(wh); return nx_err<nx_HttpResponse>("WinHttpConnect failed"); }
+    constexpr unsigned long kSecure = 0x00800000UL;
+    HINTERNET hReq = pOpenReq(hConnect, wmeth.c_str(), wpath.c_str(), nullptr, nullptr, nullptr, kSecure);
+    if (!hReq) { pClose(hConnect); pClose(hSession); FreeLibrary(wh); return nx_err<nx_HttpResponse>("WinHttpOpenRequest failed"); }
+    void *bptr = body.empty() ? nullptr : const_cast<char *>(body.c_str());
+    unsigned long blen = static_cast<unsigned long>(body.size());
+    int ok = pSendReq(hReq, whdr.empty() ? nullptr : whdr.c_str(), static_cast<unsigned long>(whdr.size()), bptr, blen, blen, 0);
+    if (ok) ok = pRecvResp(hReq, nullptr);
+    if (!ok) {
+        pClose(hReq); pClose(hConnect); pClose(hSession); FreeLibrary(wh);
+        return nx_err<nx_HttpResponse>("HTTPS request failed");
+    }
+    unsigned long status_code = 0;
+    unsigned long slen = sizeof(status_code);
+    constexpr unsigned long kStatusNum = 19 | 0x20000000UL; // WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER
+    pQueryHdr(hReq, kStatusNum, nullptr, &status_code, &slen, nullptr);
+
+    std::string resp_body;
+    unsigned long avail = 0;
+    while (pQueryAvail(hReq, &avail) && avail > 0) {
+        std::string chunk(avail, '\0');
+        unsigned long read_bytes = 0;
+        if (!pReadData(hReq, chunk.data(), avail, &read_bytes) || read_bytes == 0) break;
+        chunk.resize(read_bytes);
+        resp_body += chunk;
+    }
+    pClose(hReq); pClose(hConnect); pClose(hSession); FreeLibrary(wh);
+    nx_HttpResponse resp;
+    resp.nx_status = static_cast<std::int32_t>(status_code);
+    resp.nx_headers = NxStr("HTTPS/WinHTTP");
+    resp.nx_body = NxStr::from_std(resp_body);
+    return nx_ok(std::move(resp));
+#else
+    // POSIX native TLS via OpenSSL (libssl) loaded dynamically
+    void *ssl_lib = dlopen("libssl.so.3", RTLD_LAZY);
+    if (!ssl_lib) ssl_lib = dlopen("libssl.so", RTLD_LAZY);
+    if (!ssl_lib) ssl_lib = dlopen("libssl.dylib", RTLD_LAZY);
+    if (!ssl_lib) return nx_err<nx_HttpResponse>("HTTPS requires OpenSSL libssl on POSIX");
+    using FnCtxNew = void *(*)(const void *);
+    using FnMethod = const void *(*)();
+    using FnCtxFree = void (*)(void *);
+    using FnSslNew = void *(*)(void *);
+    using FnSslFree = void (*)(void *);
+    using FnSetFd = int (*)(void *, int);
+    using FnConnect = int (*)(void *);
+    using FnWrite = int (*)(void *, const void *, int);
+    using FnRead = int (*)(void *, void *, int);
+    using FnCtrl = long (*)(void *, int, long, void *);
+    using FnSetDefaultVerify = int (*)(void *);
+    using FnSetVerify = void (*)(void *, int, void *);
+    using FnSet1Host = int (*)(void *, const char *);
+    using FnGetVerifyResult = long (*)(void *);
+    auto pMethod = reinterpret_cast<FnMethod>(dlsym(ssl_lib, "TLS_client_method"));
+    auto pCtxNew = reinterpret_cast<FnCtxNew>(dlsym(ssl_lib, "SSL_CTX_new"));
+    auto pCtxFree = reinterpret_cast<FnCtxFree>(dlsym(ssl_lib, "SSL_CTX_free"));
+    auto pSslNew = reinterpret_cast<FnSslNew>(dlsym(ssl_lib, "SSL_new"));
+    auto pSslFree = reinterpret_cast<FnSslFree>(dlsym(ssl_lib, "SSL_free"));
+    auto pSetFd = reinterpret_cast<FnSetFd>(dlsym(ssl_lib, "SSL_set_fd"));
+    auto pConnect = reinterpret_cast<FnConnect>(dlsym(ssl_lib, "SSL_connect"));
+    auto pWrite = reinterpret_cast<FnWrite>(dlsym(ssl_lib, "SSL_write"));
+    auto pRead = reinterpret_cast<FnRead>(dlsym(ssl_lib, "SSL_read"));
+    auto pCtrl = reinterpret_cast<FnCtrl>(dlsym(ssl_lib, "SSL_ctrl"));
+    auto pSetDefaultVerify = reinterpret_cast<FnSetDefaultVerify>(dlsym(ssl_lib, "SSL_CTX_set_default_verify_paths"));
+    auto pSetVerify = reinterpret_cast<FnSetVerify>(dlsym(ssl_lib, "SSL_set_verify"));
+    auto pSet1Host = reinterpret_cast<FnSet1Host>(dlsym(ssl_lib, "SSL_set1_host"));
+    auto pGetVerifyResult = reinterpret_cast<FnGetVerifyResult>(dlsym(ssl_lib, "SSL_get_verify_result"));
+    if (!pMethod || !pCtxNew || !pCtxFree || !pSslNew || !pSslFree || !pSetFd || !pConnect || !pWrite || !pRead || !pSetDefaultVerify || !pSetVerify || !pSet1Host || !pGetVerifyResult) {
+        dlclose(ssl_lib);
+        return nx_err<nx_HttpResponse>("OpenSSL missing required TLS/verification symbols");
+    }
+    auto conn = nx_TcpStream::connect_to(NxStr::from_std(host), port, 5000);
+    if (conn.is_err()) { dlclose(ssl_lib); return nx_err<nx_HttpResponse>(conn.error()); }
+    auto stream = conn.value();
+    void *ctx = pCtxNew(pMethod());
+    if (ctx) pSetDefaultVerify(ctx);
+    void *ssl = ctx ? pSslNew(ctx) : nullptr;
+    if (!ssl) { if (ctx) pCtxFree(ctx); stream.nx_close(); dlclose(ssl_lib); return nx_err<nx_HttpResponse>("SSL_new failed"); }
+    pSetVerify(ssl, 1 /* SSL_VERIFY_PEER */, nullptr);
+    pSet1Host(ssl, host.c_str());
+    if (pCtrl) pCtrl(ssl, 55 /* SSL_CTRL_SET_TLSEXT_HOSTNAME */, 0, const_cast<char *>(host.c_str()));
+    pSetFd(ssl, static_cast<int>(stream.raw_fd()));
+    if (pConnect(ssl) <= 0 || pGetVerifyResult(ssl) != 0 /* X509_V_OK */) {
+        pSslFree(ssl); pCtxFree(ctx); stream.nx_close(); dlclose(ssl_lib);
+        return nx_err<nx_HttpResponse>("TLS handshake or certificate/hostname verification failed");
+    }
+    NxStrBuilder req;
+    req.append(method).append(" ").append(path).append(" HTTP/1.1\r\nHost: ").append(host).append("\r\nConnection: close\r\nUser-Agent: NEXIR/2.0\r\n");
+    if (!body.empty()) {
+        req.append("Content-Type: ").append(content_type).append("\r\nContent-Length: ").append(static_cast<std::int64_t>(body.size())).append("\r\n");
+    }
+    req.append("\r\n");
+    if (!body.empty()) req.append(body);
+    NxStr rstr = req.finish();
+    pWrite(ssl, rstr.c_str(), static_cast<int>(rstr.size()));
+    std::string raw;
+    char buf[4096];
+    int nr = 0;
+    while ((nr = pRead(ssl, buf, sizeof(buf))) > 0) raw.append(buf, static_cast<std::size_t>(nr));
+    pSslFree(ssl); pCtxFree(ctx); stream.nx_close(); dlclose(ssl_lib);
+    std::size_t hdr_end = raw.find("\r\n\r\n");
+    if (hdr_end == std::string::npos) return nx_err<nx_HttpResponse>("malformed HTTPS response");
+    std::string hdr = raw.substr(0, hdr_end);
+    std::string bdy = raw.substr(hdr_end + 4);
+    int code = 0;
+    std::size_t sp = hdr.find(' ');
+    if (sp != std::string::npos) code = std::atoi(hdr.c_str() + sp + 1);
+    nx_HttpResponse resp;
+    resp.nx_status = code;
+    resp.nx_headers = NxStr::from_std(hdr);
+    resp.nx_body = NxStr::from_std(bdy);
+    return nx_ok(std::move(resp));
+#endif
+}
+
 static inline nx_result<nx_HttpResponse> nx_http_request(const NxStr &method, const NxStr &url,
                                                          const NxStr &body = NxStr(),
                                                          const NxStr &content_type = NxStr("application/json")) {
     std::string u(url.view());
-    if (u.rfind("http://", 0) != 0) return nx_err<nx_HttpResponse>("nx_http_request supports http:// URLs natively");
-    std::string rest = u.substr(7);
+    bool is_https = u.rfind("https://", 0) == 0;
+    bool is_http = u.rfind("http://", 0) == 0;
+    if (!is_http && !is_https) return nx_err<nx_HttpResponse>("nx_http_request supports http:// and https:// URLs natively");
+    std::string rest = u.substr(is_https ? 8 : 7);
     std::size_t slash = rest.find('/');
     std::string host_port = slash == std::string::npos ? rest : rest.substr(0, slash);
     std::string path = slash == std::string::npos ? "/" : rest.substr(slash);
     std::size_t colon = host_port.find(':');
     std::string host = colon == std::string::npos ? host_port : host_port.substr(0, colon);
-    int port = colon == std::string::npos ? 80 : std::atoi(host_port.substr(colon + 1).c_str());
+    int port = colon == std::string::npos ? (is_https ? 443 : 80) : std::atoi(host_port.substr(colon + 1).c_str());
+    if (is_https) {
+        return nx_https_request_native(method, host, port, path, body, content_type);
+    }
 
     auto conn = nx_TcpStream::connect_to(NxStr::from_std(host), port, 5000);
     if (conn.is_err()) return nx_err<nx_HttpResponse>(conn.error());

@@ -395,32 +395,91 @@ static inline std::int64_t nx_thread_cpu_count() {
 
 template <typename T>
 class nx_Channel {
+    struct LockFreeSlot {
+        std::atomic<std::size_t> seq{0};
+        T data{};
+    };
     struct State {
+        // Bounded lock-free MPMC ring buffer (when cap > 0)
+        std::size_t cap = 0;
+        std::size_t mask = 0;
+        std::vector<LockFreeSlot> ring;
+        alignas(64) std::atomic<std::size_t> enqueue_pos{0};
+        alignas(64) std::atomic<std::size_t> dequeue_pos{0};
+        std::atomic<bool> closed{false};
+        // Unbounded fallback (when cap == 0)
         std::mutex mu;
         std::condition_variable cv_send;
         std::condition_variable cv_recv;
         std::deque<T> queue;
-        std::size_t cap = 0; // 0 = unbounded
-        bool closed = false;
     };
     std::shared_ptr<State> state_;
+
+    static std::size_t next_pow2(std::size_t n) noexcept {
+        std::size_t p = 1;
+        while (p < n) p <<= 1;
+        return p;
+    }
+
 public:
     explicit nx_Channel(std::int64_t capacity = 0) : state_(std::make_shared<State>()) {
-        state_->cap = capacity > 0 ? static_cast<std::size_t>(capacity) : 0;
+        if (capacity > 0) {
+            std::size_t p2 = next_pow2(static_cast<std::size_t>(capacity));
+            if (p2 < 2) p2 = 2;
+            state_->cap = p2;
+            state_->mask = p2 - 1;
+            state_->ring = std::vector<LockFreeSlot>(p2);
+            for (std::size_t i = 0; i < p2; ++i) {
+                state_->ring[i].seq.store(i, std::memory_order_relaxed);
+            }
+        }
     }
     bool nx_send(T val) {
-        std::unique_lock<std::mutex> lock(state_->mu);
         if (state_->cap > 0) {
-            state_->cv_send.wait(lock, [this]() { return state_->closed || state_->queue.size() < state_->cap; });
+            while (!state_->closed.load(std::memory_order_acquire)) {
+                std::size_t pos = state_->enqueue_pos.load(std::memory_order_relaxed);
+                LockFreeSlot &slot = state_->ring[pos & state_->mask];
+                std::size_t seq = slot.seq.load(std::memory_order_acquire);
+                std::intptr_t diff = static_cast<std::intptr_t>(seq) - static_cast<std::intptr_t>(pos);
+                if (diff == 0) {
+                    if (state_->enqueue_pos.compare_exchange_weak(pos, pos + 1, std::memory_order_relaxed)) {
+                        slot.data = std::move(val);
+                        slot.seq.store(pos + 1, std::memory_order_release);
+                        return true;
+                    }
+                } else if (diff < 0) {
+                    std::this_thread::yield();
+                }
+            }
+            return false;
         }
-        if (state_->closed) return false;
+        std::unique_lock<std::mutex> lock(state_->mu);
+        if (state_->closed.load(std::memory_order_acquire)) return false;
         state_->queue.push_back(std::move(val));
         state_->cv_recv.notify_one();
         return true;
     }
     std::optional<T> nx_recv() {
+        if (state_->cap > 0) {
+            while (true) {
+                std::size_t pos = state_->dequeue_pos.load(std::memory_order_relaxed);
+                LockFreeSlot &slot = state_->ring[pos & state_->mask];
+                std::size_t seq = slot.seq.load(std::memory_order_acquire);
+                std::intptr_t diff = static_cast<std::intptr_t>(seq) - static_cast<std::intptr_t>(pos + 1);
+                if (diff == 0) {
+                    if (state_->dequeue_pos.compare_exchange_weak(pos, pos + 1, std::memory_order_relaxed)) {
+                        T v = std::move(slot.data);
+                        slot.seq.store(pos + state_->mask + 1, std::memory_order_release);
+                        return v;
+                    }
+                } else if (diff < 0) {
+                    if (state_->closed.load(std::memory_order_acquire)) return std::nullopt;
+                    std::this_thread::yield();
+                }
+            }
+        }
         std::unique_lock<std::mutex> lock(state_->mu);
-        state_->cv_recv.wait(lock, [this]() { return state_->closed || !state_->queue.empty(); });
+        state_->cv_recv.wait(lock, [this]() { return state_->closed.load(std::memory_order_acquire) || !state_->queue.empty(); });
         if (state_->queue.empty()) return std::nullopt;
         T v = std::move(state_->queue.front());
         state_->queue.pop_front();
@@ -428,6 +487,18 @@ public:
         return v;
     }
     std::optional<T> nx_try_recv() {
+        if (state_->cap > 0) {
+            std::size_t pos = state_->dequeue_pos.load(std::memory_order_relaxed);
+            LockFreeSlot &slot = state_->ring[pos & state_->mask];
+            std::size_t seq = slot.seq.load(std::memory_order_acquire);
+            std::intptr_t diff = static_cast<std::intptr_t>(seq) - static_cast<std::intptr_t>(pos + 1);
+            if (diff == 0 && state_->dequeue_pos.compare_exchange_weak(pos, pos + 1, std::memory_order_relaxed)) {
+                T v = std::move(slot.data);
+                slot.seq.store(pos + state_->mask + 1, std::memory_order_release);
+                return v;
+            }
+            return std::nullopt;
+        }
         std::lock_guard<std::mutex> lock(state_->mu);
         if (state_->queue.empty()) return std::nullopt;
         T v = std::move(state_->queue.front());
@@ -436,8 +507,8 @@ public:
         return v;
     }
     void nx_close() {
+        state_->closed.store(true, std::memory_order_release);
         std::lock_guard<std::mutex> lock(state_->mu);
-        state_->closed = true;
         state_->cv_send.notify_all();
         state_->cv_recv.notify_all();
     }

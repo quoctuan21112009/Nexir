@@ -409,7 +409,19 @@ NxAbiWireVal invoke_callable(PyObject *callable, std::size_t argc, const NxAbiWi
         for (std::size_t i = 0; i < kw_count; ++i) {
             PyObject *val = abi_to_py(argv[pos_count + i]);
             if (val) {
-                PyDict_SetItemString(kwargs_dict, kw_names[i], val);
+                if (kw_names[i] && std::strcmp(kw_names[i], "**") == 0) {
+                    if (PyDict_Check(val)) {
+                        PyDict_Merge(kwargs_dict, val, 1);
+                    } else {
+                        Py_DECREF(val);
+                        Py_DECREF(args_tuple);
+                        Py_DECREF(kwargs_dict);
+                        err.payload.ptr = dup_cstr("**kwargs argument must be a dict", 32);
+                        return err;
+                    }
+                } else {
+                    PyDict_SetItemString(kwargs_dict, kw_names[i], val);
+                }
                 Py_DECREF(val);
             }
         }

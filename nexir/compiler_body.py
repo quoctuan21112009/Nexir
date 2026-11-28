@@ -325,8 +325,8 @@ class BodyGenerator:
         buf = buffer_parts(typ)
         if buf:
             elem = buf[1]
-        if not elem and typ != "str":
-            raise self.error_cls("slicing requires List, Span, Buffer or str", node)
+        if not elem and typ not in {"str", "dyn"}:
+            raise self.error_cls("slicing requires List, Span, Buffer, str or dyn", node)
         assert isinstance(node.slice, ast.Slice)
         fields = []
         for part in (node.slice.lower, node.slice.upper, node.slice.step):
@@ -340,6 +340,32 @@ class BodyGenerator:
         if node.slice.step is None:
             fields[2] = "1"
         args = f"{fields[0]}, {fields[1]}, {fields[2]}, {'true' if node.slice.lower is not None else 'false'}, {'true' if node.slice.upper is not None else 'false'}"
+        if typ == "dyn":
+            has_lo = "true" if node.slice.lower is not None else "false"
+            has_hi = "true" if node.slice.upper is not None else "false"
+            if self.compiler.uses_python:
+                return (
+                    f"([&]() {{ NxValue _c = {container}; "
+                    f"if (_c.type == 9 && _c.data.ptr) {{ "
+                    f"NxAbiWireVal _sa[3]; "
+                    f"_sa[0] = {has_lo} ? nx_to_abi_wire(static_cast<std::int64_t>({fields[0]})) : NxAbiWireVal{{NX_ABI_T_NULL, 0, {{}}}}; "
+                    f"_sa[1] = {has_hi} ? nx_to_abi_wire(static_cast<std::int64_t>({fields[1]})) : NxAbiWireVal{{NX_ABI_T_NULL, 0, {{}}}}; "
+                    f"_sa[2] = nx_to_abi_wire(static_cast<std::int64_t>({fields[2]})); "
+                    f"NxAbiWireVal _sl = nx_py_abi_call(\"builtins\", \"slice\", 3, _sa, nullptr, 0); "
+                    f"NxValue _res = nx_py_dyn_method(_c, \"__getitem__\", 1, &_sl, nullptr, 0); "
+                    f"nx_py_abi_release_val(&_sl); return _res; }} "
+                    f"if (_c.type == 3 && _c.data.ptr) return NxValue::string(nx_string_slice(*std::static_pointer_cast<NxStr>(_c.data.ptr->object), {args})); "
+                    f"if (_c.type == 7 && _c.data.ptr) {{ const auto &_v = *std::static_pointer_cast<nx_vec<NxValue>>(_c.data.ptr->object); return NxValue::list(nx_list_slice(_v.data(), _v.size(), {args})); }} "
+                    f"nx_fail(\"dyn object does not support slicing\"); }}())",
+                    "dyn",
+                )
+            return (
+                f"([&]() {{ NxValue _c = {container}; "
+                f"if (_c.type == 3 && _c.data.ptr) return NxValue::string(nx_string_slice(*std::static_pointer_cast<NxStr>(_c.data.ptr->object), {args})); "
+                f"if (_c.type == 7 && _c.data.ptr) {{ const auto &_v = *std::static_pointer_cast<nx_vec<NxValue>>(_c.data.ptr->object); return NxValue::list(nx_list_slice(_v.data(), _v.size(), {args})); }} "
+                f"nx_fail(\"dyn object does not support slicing\"); }}())",
+                "dyn",
+            )
         if typ == "str":
             return f"nx_string_slice({container}, {args})", "str"
         ptr = f"({container}).data()" if list_element(typ) else f"({container}).ptr" if span_element(typ) else f"({container}){'->' if buf and buf[0] == 'owned' else '.'}data()"
@@ -585,17 +611,23 @@ class BodyGenerator:
         self.serial += 1
         sfx = self.serial
         arg_vals: list[str] = []
-        keep_stmts: list[str] = []
+        keep_stmts: list[str] = [f"NxAbiWireArena nx_arena_{sfx};"]
         kw_names: list[str] = []
         for idx, arg in enumerate(node.args):
             c, t = self.expr(arg)
             arg_vals.append(self._marshal_to_abi_wire(c, t, f"{sfx}_{idx}", keep_stmts))
         for kidx, kw in enumerate(node.keywords):
             if kw.arg is None:
-                raise self.error_cls("**kwargs unpacking in Python calls is not supported", kw)
-            kw_names.append(kw.arg)
-            c, t = self.expr(kw.value)
-            arg_vals.append(self._marshal_to_abi_wire(c, t, f"{sfx}_kw{kidx}", keep_stmts))
+                c, t = self.expr(kw.value)
+                dp = dict_parts(t)
+                if not ((dp and dp[0] == "str") or t == "dyn"):
+                    raise self.error_cls("**kwargs unpacking requires Dict[str, T] or dyn dict", kw)
+                kw_names.append("**")
+                arg_vals.append(self._marshal_to_abi_wire(c, t, f"{sfx}_kw{kidx}", keep_stmts))
+            else:
+                kw_names.append(kw.arg)
+                c, t = self.expr(kw.value)
+                arg_vals.append(self._marshal_to_abi_wire(c, t, f"{sfx}_kw{kidx}", keep_stmts))
         total_args = len(arg_vals)
         kw_count = len(kw_names)
         arr_init = f"NxAbiWireVal nx_pargs_{sfx}[] = {{{', '.join(arg_vals)}}};" if total_args else ""
@@ -627,23 +659,17 @@ class BodyGenerator:
             return f"nx_w_{tag}"
         le = list_element(typ)
         if le:
-            keep_stmts.append(f"const auto &nx_lv_{tag} = {expr_cpp};")
-            keep_stmts.append(f"std::vector<NxAbiWireVal> nx_li_{tag}(nx_lv_{tag}.size());")
-            keep_stmts.append(f"for (std::size_t nx_i = 0; nx_i < nx_lv_{tag}.size(); ++nx_i) nx_li_{tag}[nx_i] = nx_to_abi_wire(nx_lv_{tag}[nx_i]);")
-            keep_stmts.append(f"NxAbiWireList nx_lw_{tag}{{nx_li_{tag}.size(), nx_li_{tag}.data()}};")
-            keep_stmts.append(f"NxAbiWireVal nx_w_{tag}{{}}; nx_w_{tag}.tag = NX_ABI_T_LIST; nx_w_{tag}.payload.ptr = &nx_lw_{tag};")
-            return f"nx_w_{tag}"
+            return f"nx_arena_{tag.split('_')[0]}.pack({expr_cpp})"
+        tp = tuple_parts(typ)
+        if tp:
+            return f"nx_arena_{tag.split('_')[0]}.pack({expr_cpp})"
         dp = dict_parts(typ)
         if dp and dp[0] == "str":
-            keep_stmts.append(f"const auto &nx_dv_{tag} = {expr_cpp};")
-            keep_stmts.append(f"std::vector<const char*> nx_dk_{tag}; std::vector<NxAbiWireVal> nx_dval_{tag};")
-            keep_stmts.append(f"for (const auto &kv : nx_dv_{tag}) {{ nx_dk_{tag}.push_back(kv.first.c_str()); nx_dval_{tag}.push_back(nx_to_abi_wire(kv.second)); }}")
-            keep_stmts.append(f"NxAbiWireDict nx_dw_{tag}{{nx_dk_{tag}.size(), nx_dk_{tag}.data(), nx_dval_{tag}.data()}};")
-            keep_stmts.append(f"NxAbiWireVal nx_w_{tag}{{}}; nx_w_{tag}.tag = NX_ABI_T_DICT; nx_w_{tag}.payload.ptr = &nx_dw_{tag};")
-            return f"nx_w_{tag}"
+            return f"nx_arena_{tag.split('_')[0]}.pack({expr_cpp})"
         if typ == "str":
-            keep_stmts.append(f"NxStr nx_sv_{tag} = {expr_cpp};")
-            return f"nx_to_abi_wire(nx_sv_{tag})"
+            return f"nx_arena_{tag.split('_')[0]}.pack({expr_cpp})"
+        if typ == "dyn":
+            return f"nx_arena_{tag.split('_')[0]}.pack({expr_cpp})"
         return f"nx_to_abi_wire({expr_cpp})"
 
     def _call_cpp_direct(self, header: str, sym: str, node: ast.Call, *, expected_hint: str | None = None) -> tuple[str, str]:
@@ -659,6 +685,13 @@ class BodyGenerator:
                 raise self.error_cls(f"cpp.{header}.{sym} expects {len(params_t)} arguments", node)
             args = [self.argument(a, pt) for a, pt in zip(node.args, params_t)]
             return f"std::{sym}({', '.join(args)})", ret_t
+        auto_sig = self.compiler.entry_unit.foreign_sigs.get(("cpp", header), {}).get(sym)
+        if auto_sig:
+            params_t, ret_t = auto_sig
+            if len(node.args) == len(params_t):
+                args = [f"({self.argument(a, pt)}).c_str()" if pt == "str" else self.argument(a, pt) for a, pt in zip(node.args, params_t)]
+                call = f"{sym}({', '.join(args)})"
+                return (f"NxStr({call})", "str") if ret_t == "str" else (call, ret_t)
         args = []
         for a in node.args:
             c, t = self.expr(a)
@@ -676,13 +709,25 @@ class BodyGenerator:
             validate_ffi_symbol(sym, allow_process=("process.exec" in self.fn.caps))
         except ValueError as exc:
             raise self.error_cls(str(exc), node) from exc
+        auto_sig = self.compiler.entry_unit.foreign_sigs.get((kind, lib_name), {}).get(sym)
+        if not auto_sig:
+            raise self.error_cls(
+                f"missing native ABI signature for {kind}.{lib_name}.{sym}; "
+                f"provide a C header/binding or declare an explicit @extern function",
+                node,
+            )
+        params_t, ret_nx = auto_sig
+        if len(node.args) != len(params_t):
+            raise self.error_cls(
+                f"{kind}.{lib_name}.{sym} expects {len(params_t)} arguments, got {len(node.args)}",
+                node,
+            )
         arg_vals = []
         arg_types = []
-        for a in node.args:
-            c, t = self.expr(a)
-            arg_vals.append(f"({c}).c_str()" if t == "str" else c)
-            arg_types.append("const char *" if t == "str" else self._cpp_type(t))
-        ret_nx = expected_hint or "i64"
+        for a, pt in zip(node.args, params_t):
+            c = self.argument(a, pt)
+            arg_vals.append(f"({c}).c_str()" if pt == "str" else c)
+            arg_types.append("const char *" if pt == "str" else self._cpp_type(pt))
         ret_cpp = self._cpp_type(ret_nx)
         fn_ptr_sig = f"{ret_cpp}(*)({', '.join(arg_types) or 'void'})"
         call = f"reinterpret_cast<{fn_ptr_sig}>(NxNativeLibLoader::load_symbol({c_string(kind)}, {c_string(lib_name)}, {c_string(sym)}))({', '.join(arg_vals)})"
@@ -755,6 +800,9 @@ class BodyGenerator:
             cond, ct = self.expr(node.test)
             yes, yt = self.expr(node.body)
             no, nt = self.expr(node.orelse)
+            if ct == "dyn":
+                cond = f"nx_as_bool({cond})"
+                ct = "bool"
             if ct != "bool":
                 raise self.error_cls("conditional expression condition must be bool", node)
             if yt in NUMERICS and nt in NUMERICS and yt != nt:
@@ -1319,6 +1367,15 @@ class BodyGenerator:
             ret_map = {"type_name": "str", "as_i64": "i64", "as_i128": "i128", "as_f64": "f64", "as_str": "str", "as_bool": "bool"}
             return f"nx_{name}({val})", ret_map[name]
 
+        if name == "input":
+            self.require_caps({"memory.alloc"}, node)
+            if len(node.args) > 1 or node.keywords:
+                raise self.error_cls("input() expects 0 or 1 positional prompt argument", node)
+            if not node.args:
+                return "nx_builtin_input()", "str"
+            prompt_cpp = self.argument(node.args[0], "str")
+            return f"nx_builtin_input({prompt_cpp})", "str"
+
         if name == "ring_f64":
             self.require_caps({"memory.alloc"}, node)
             if len(node.args) != 1:
@@ -1534,7 +1591,8 @@ class BodyGenerator:
 
     def _call_nx_function(self, target_unit: "ModuleUnit", name: str, node: ast.Call) -> tuple[str, str]:
         fn = target_unit.functions[name]
-        self.require_caps(fn.caps, node)
+        if not getattr(target_unit, "is_trusted", False):
+            self.require_caps(fn.caps, node)
         if len(node.args) > len(fn.params):
             raise self.error_cls(f"{name} expects at most {len(fn.params)} arguments", node)
         bound: list[ast.expr | None] = [*node.args] + [None] * (len(fn.params) - len(node.args))
@@ -2402,6 +2460,9 @@ class BodyGenerator:
         if isinstance(node, ast.If):
             guard = self._detect_none_guard(node.test)
             cond, ct = self.expr(node.test)
+            if ct == "dyn":
+                cond = f"nx_as_bool({cond})"
+                ct = "bool"
             if ct != "bool":
                 raise self.error_cls("if condition must be bool", node.test)
             extra_yes: dict[str, str] = {}
@@ -2449,6 +2510,9 @@ class BodyGenerator:
             if node.orelse:
                 raise self.error_cls("while-else is not supported", node)
             cond, ct = self.expr(node.test)
+            if ct == "dyn":
+                cond = f"nx_as_bool({cond})"
+                ct = "bool"
             if ct != "bool":
                 raise self.error_cls("while condition must be bool", node.test)
             outer_vars = {n for s in self.scopes for n in s}

@@ -1,0 +1,119 @@
+import py.cv2 as _cv2
+
+# Standard OpenCV constants in pure NX 2.0
+IMREAD_UNCHANGED: i64 = -1
+IMREAD_GRAYSCALE: i64 = 0
+IMREAD_COLOR: i64 = 1
+
+COLOR_BGR2GRAY: i64 = 6
+COLOR_BGR2RGB: i64 = 4
+COLOR_RGB2BGR: i64 = 4
+COLOR_GRAY2BGR: i64 = 8
+
+THRESH_BINARY: i64 = 0
+THRESH_BINARY_INV: i64 = 1
+
+
+@cap("memory.alloc", "python.interop")
+def version() -> str:
+    return as_str(_cv2.__version__)
+
+
+@cap("memory.alloc", "python.interop")
+def get_build_info() -> str:
+    return as_str(_cv2.getBuildInformation())
+
+
+@cap("memory.alloc", "python.interop")
+def imread(path: str, flags: i64 = 1) -> dyn:
+    return _cv2.imread(path, flags)
+
+
+@cap("memory.alloc", "python.interop")
+def imwrite(path: str, img: dyn) -> bool:
+    return as_bool(_cv2.imwrite(path, img))
+
+
+@cap("memory.alloc", "python.interop")
+def imshow(winname: str, img: dyn) -> void:
+    _cv2.imshow(winname, img)
+
+
+@cap("memory.alloc", "python.interop")
+def wait_key(delay_ms: i64 = 0) -> i64:
+    return as_i64(_cv2.waitKey(delay_ms))
+
+
+@cap("memory.alloc", "python.interop")
+def waitKey(delay_ms: i64 = 0) -> i64:
+    return as_i64(_cv2.waitKey(delay_ms))
+
+
+@cap("memory.alloc", "python.interop")
+def destroy_all_windows() -> void:
+    _cv2.destroyAllWindows()
+
+
+@cap("memory.alloc", "python.interop")
+def destroyAllWindows() -> void:
+    _cv2.destroyAllWindows()
+
+
+@cap("memory.alloc", "python.interop")
+def cvt_color(img: dyn, code: i64) -> dyn:
+    return _cv2.cvtColor(img, code)
+
+
+@cap("memory.alloc", "python.interop")
+def cvtColor(img: dyn, code: i64) -> dyn:
+    return _cv2.cvtColor(img, code)
+
+
+@cap("memory.alloc", "python.interop")
+def resize(img: dyn, width: i64, height: i64) -> dyn:
+    return _cv2.resize(img, [width, height])
+
+
+@cap("memory.alloc", "python.interop")
+def gaussian_blur(img: dyn, ksize_x: i64, ksize_y: i64, sigma_x: f64 = 0.0) -> dyn:
+    return _cv2.GaussianBlur(img, [ksize_x, ksize_y], sigma_x)
+
+
+@cap("memory.alloc", "python.interop")
+def GaussianBlur(img: dyn, ksize: dyn, sigma_x: f64 = 0.0) -> dyn:
+    return _cv2.GaussianBlur(img, ksize, sigma_x)
+
+
+@cap("memory.alloc", "python.interop")
+def canny(img: dyn, threshold1: f64, threshold2: f64) -> dyn:
+    return _cv2.Canny(img, threshold1, threshold2)
+
+
+@cap("memory.alloc", "python.interop")
+def Canny(img: dyn, threshold1: f64, threshold2: f64) -> dyn:
+    return _cv2.Canny(img, threshold1, threshold2)
+
+
+@cap("memory.alloc", "python.interop")
+def threshold(img: dyn, thresh: f64, maxval: f64, typ: i64 = 0) -> dyn:
+    return _cv2.threshold(img, thresh, maxval, typ)
+
+
+@cap("memory.alloc", "python.interop")
+def rectangle(img: dyn, x1: i64, y1: i64, x2: i64, y2: i64, b: i64, g: i64, r: i64, thickness: i64 = 2) -> dyn:
+    return _cv2.rectangle(img, [x1, y1], [x2, y2], [b, g, r], thickness)
+
+
+@cap("memory.alloc", "python.interop")
+def circle(img: dyn, cx: i64, cy: i64, radius: i64, b: i64, g: i64, r: i64, thickness: i64 = 2) -> dyn:
+    return _cv2.circle(img, [cx, cy], radius, [b, g, r], thickness)
+
+
+@cap("memory.alloc", "python.interop")
+def line(img: dyn, x1: i64, y1: i64, x2: i64, y2: i64, b: i64, g: i64, r: i64, thickness: i64 = 2) -> dyn:
+    return _cv2.line(img, [x1, y1], [x2, y2], [b, g, r], thickness)
+
+
+@cap("memory.alloc", "python.interop")
+def put_text(img: dyn, text: str, x: i64, y: i64, scale: f64, b: i64, g: i64, r: i64, thickness: i64 = 2) -> dyn:
+    return _cv2.putText(img, text, [x, y], 0, scale, [b, g, r], thickness)

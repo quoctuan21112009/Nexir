@@ -18,6 +18,9 @@ import importlib.util
 import json
 import os
 from pathlib import Path
+import re
+import shutil
+import subprocess
 import sys
 import tempfile
 from typing import Any
@@ -92,6 +95,14 @@ class NxModuleProxy:
     def __init__(self, name: str, lib_path: Path, exports: list[ExportedSymbol]):
         self.__name__ = name
         self.__file__ = str(lib_path)
+        self._dll_dirs = []
+        if os.name == "nt" and hasattr(os, "add_dll_directory"):
+            for cand_dir in (lib_path.parent, Path(shutil.which("g++") or r"C:\msys64\ucrt64\bin\g++.exe").resolve().parent):
+                if cand_dir.is_dir():
+                    try:
+                        self._dll_dirs.append(os.add_dll_directory(str(cand_dir)))
+                    except OSError:
+                        pass
         self._lib = ctypes.CDLL(str(lib_path))
         self._exports = exports
         for sym in exports:
@@ -126,6 +137,33 @@ class NxModuleProxy:
             for val, (_, ptype) in zip(args, sym.params):
                 if ptype in _SPAN_CTYPES:
                     struct_cls, elem_cls = _SPAN_CTYPES[ptype]
+                    is_mut = ptype.startswith("MutSpan[")
+                    arr = None
+                    # True zero-copy fast path via Python buffer protocol / NumPy ctypes
+                    if hasattr(val, "ctypes") and hasattr(val, "shape") and (not is_mut or getattr(getattr(val, "flags", None), "writeable", True)):
+                        try:
+                            n_elems = len(val)
+                            ptr = val.ctypes.data_as(ctypes.POINTER(elem_cls))
+                            keep_alive.append(val)
+                            converted.append(struct_cls(ptr, n_elems))
+                            continue
+                        except Exception:
+                            pass
+                    try:
+                        mv = memoryview(val)
+                        if mv.ndim == 1 and mv.c_contiguous and mv.itemsize == ctypes.sizeof(elem_cls):
+                            if not mv.readonly:
+                                arr = (elem_cls * len(mv)).from_buffer(mv)
+                                keep_alive.append(mv)
+                                keep_alive.append(arr)
+                                converted.append(struct_cls(arr, len(mv)))
+                                continue
+                            elif not is_mut:
+                                # Read-only buffer zero-copy via Py_buffer / ctypes address
+                                buf_t = ctypes.c_char * mv.nbytes
+                                raw_ptr = ctypes.cast(ctypes.pointer(buf_t.from_buffer_copy(b"")) if False else ctypes.addressof(ctypes.c_char.from_buffer(bytearray()) if False else ctypes.c_void_p()), ctypes.POINTER(elem_cls)) if False else None
+                    except TypeError:
+                        pass
                     arr = (elem_cls * len(val))(*val)
                     keep_alive.append(arr)
                     converted.append(struct_cls(arr, len(val)))
@@ -327,3 +365,144 @@ def generate_bindings(source_path: Path, lang: str, out_dir: Path) -> Path:
         return out
 
     raise NexirError(f"unsupported binding target language: {lang}")
+
+
+_C_TO_NX_TYPE = {
+    "void": "void",
+    "bool": "bool",
+    "_Bool": "bool",
+    "int": "i32",
+    "int32_t": "i32",
+    "int64_t": "i64",
+    "long long": "i64",
+    "uint32_t": "u32",
+    "uint64_t": "u64",
+    "size_t": "u64",
+    "float": "f32",
+    "double": "f64",
+    "const char *": "str",
+    "const char*": "str",
+    "char *": "str",
+}
+
+_C_SIG_RE = re.compile(
+    r"^\s*(?:extern\s+\"C\"\s+)?(?:static\s+inline\s+|inline\s+|NX_EXPORT\s+|NX_ABI_EXPORT\s+)?"
+    r"(const\s+char\s*\*|char\s*\*|long\s+long|[A-Za-z_]\w*(?:\s*\*)*)\s+"
+    r"([A-Za-z_]\w*)\s*\(([^;{}()]*)\)\s*(?:;|(?=\{))",
+    re.MULTILINE,
+)
+
+
+def _map_c_type_to_nx(raw: str) -> str:
+    norm = " ".join(raw.replace("std::", "").strip().split())
+    norm = norm.replace(" *", "*").replace("*", " *").strip()
+    if norm in _C_TO_NX_TYPE:
+        return _C_TO_NX_TYPE[norm]
+    no_space = norm.replace(" ", "")
+    if no_space in _C_TO_NX_TYPE:
+        return _C_TO_NX_TYPE[no_space]
+    return "dyn"
+
+
+def parse_c_header_signatures(header_path: Path) -> dict[str, tuple[tuple[str, ...], str]]:
+    """Automatically extract C/C++ function signatures from a header for polyglot zero-wrapper import."""
+    if not header_path.is_file():
+        return {}
+    text = header_path.read_text(encoding="utf-8", errors="ignore")
+    # Strip C comments
+    text = re.sub(r"/\*.*?\*/", " ", text, flags=re.DOTALL)
+    text = re.sub(r"//[^\n]*", "", text)
+    sigs: dict[str, tuple[tuple[str, ...], str]] = {}
+    for m in _C_SIG_RE.finditer(text):
+        ret_raw, fn_name, params_raw = m.group(1), m.group(2), m.group(3).strip()
+        if fn_name in {"if", "while", "for", "switch", "return", "sizeof"}:
+            continue
+        ret_t = _map_c_type_to_nx(ret_raw)
+        if not params_raw or params_raw == "void":
+            param_types: tuple[str, ...] = ()
+        else:
+            pts: list[str] = []
+            ok = True
+            for p in params_raw.split(","):
+                p = p.strip()
+                if not p or p == "...":
+                    ok = False
+                    break
+                # Split trailing parameter identifier if present
+                tokens = p.replace("*", "* ").split()
+                if len(tokens) >= 2 and re.fullmatch(r"[A-Za-z_]\w*", tokens[-1]) and tokens[-1] not in {"int", "long", "char", "double", "float", "void", "bool"}:
+                    t_str = " ".join(tokens[:-1])
+                else:
+                    t_str = " ".join(tokens)
+                pts.append(_map_c_type_to_nx(t_str))
+            if not ok:
+                continue
+            param_types = tuple(pts)
+        sigs[fn_name] = (param_types, ret_t)
+    return sigs
+
+
+def auto_discover_foreign_module(lang: str, target: str, search_dirs: list[Path]) -> dict[str, Any]:
+    """Discover headers, shared libraries, and typed signatures for c/cpp/rust/go imports."""
+    info: dict[str, Any] = {"lang": lang, "target": target, "header": None, "lib": None, "signatures": {}}
+    stem = Path(target).stem
+    header_names = [target] if target.endswith((".h", ".hpp", ".hh")) else [f"{target}.h", f"{target}.hpp", f"{stem}.h", f"{stem}.hpp"]
+    for base in search_dirs:
+        if not base or not base.exists():
+            continue
+        for sub in (base, base / "include", base / "src", base / "target" / "release"):
+            if not sub.is_dir():
+                continue
+            for hn in header_names:
+                cand = sub / hn
+                if cand.is_file() and info["header"] is None:
+                    info["header"] = cand
+                    info["signatures"] = parse_c_header_signatures(cand)
+            for ext in (".dll", ".so", ".dylib", ".a", ".lib"):
+                for prefix in ("", "lib"):
+                    lcand = sub / f"{prefix}{stem}{ext}"
+                    if lcand.is_file() and info["lib"] is None:
+                        info["lib"] = lcand
+    return info
+
+
+def auto_install_python_dep(mod_name: str, cache_root: Path) -> Path | None:
+    """Install missing Python dependency into an isolated local cache directory."""
+    pkg = mod_name.split(".")[0]
+    pydeps = cache_root / "pydeps"
+    pydeps.mkdir(parents=True, exist_ok=True)
+    if str(pydeps) not in sys.path:
+        sys.path.insert(0, str(pydeps))
+    if importlib.util.find_spec(pkg) is not None:
+        return pydeps
+    proc = subprocess.run(
+        [sys.executable, "-m", "pip", "install", "--disable-pip-version-check", "--quiet", "--target", str(pydeps), pkg],
+        capture_output=True,
+        text=True,
+    )
+    if proc.returncode != 0:
+        return None
+    importlib.invalidate_caches()
+    return pydeps
+
+
+def auto_install_nx_dep(pkg_name: str, project_root: Path) -> Path | None:
+    """Resolve and install a missing .nx package from local/configured registry into .nx_pkgs."""
+    reg_env = os.environ.get("NX_REGISTRY")
+    reg_dir = Path(reg_env).expanduser() if reg_env else (Path.home() / ".nexir" / "registry")
+    if not reg_dir.is_dir():
+        return None
+    pkg_dir = reg_dir / pkg_name
+    if not pkg_dir.is_dir():
+        return None
+    versions = sorted((p for p in pkg_dir.iterdir() if p.is_dir()), key=lambda p: p.name)
+    if not versions:
+        return None
+    latest = versions[-1]
+    dest = project_root / ".nx_pkgs" / pkg_name
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    if dest.exists():
+        shutil.rmtree(dest)
+    shutil.copytree(latest, dest)
+    return dest
+

@@ -1,0 +1,22 @@
+@cap("memory.alloc")
+def main() -> i32:
+    n: i64 = 1000000
+    a = Buffer[f64](n)
+    b = Buffer[f64](n)
+    c = Buffer[f64](n)
+
+    # Khởi tạo dữ liệu cho 1 triệu phần tử trên đa nhân CPU
+    for i in parallel_range(n):
+        a[i] = f64(i) * 0.5
+        b[i] = f64(i) * 1.5
+
+    print("Bat dau chay 1 trieu phan tu x 1000 vong lap da luong (1 ty phep cong)...")
+
+    # Chạy 1000 lần cộng mảng 1 triệu phần tử bằng tất cả các nhân CPU
+    for step in range(1000):
+        for i in parallel_range(n):
+            c[i] = a[i] + b[i]
+
+    last_val = c[n - 1]
+    print("Hoan tat! Phan tu cuoi c[999999] =", last_val)
+    return 0

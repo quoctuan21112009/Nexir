@@ -1,0 +1,11 @@
+import py.cv2 as cv2
+import py.numpy as np
+
+@cap("python.interop", "memory.alloc")
+def main() -> i32:
+    img = np.zeros([200, 200, 3], dtype="uint8")
+    cv2.circle(img, [100, 100], 50, [0, 255, 0], -1)
+    cv2.imwrite("a.png", img)
+
+    print("Đã vẽ và lưu ảnh thành công!")
+    return 0
